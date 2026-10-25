@@ -53,6 +53,7 @@ internal sealed class MainForm : Form
     private readonly ListBox _hotkeyList = new() { Dock = DockStyle.Fill, IntegralHeight = false };
     private readonly StatusStrip _status = new();
     private readonly ToolStripStatusLabel _statusLabel = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly ToolStripStatusLabel _metricsLabel = new() { Spring = true, TextAlign = ContentAlignment.MiddleRight };
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 500 };
 
     private bool _refreshing;
@@ -158,6 +159,14 @@ internal sealed class MainForm : Form
             _statusLabel.Text =
                 $"{status.Phase} | 真麦:{On(status.Switches.MicSendEnabled)} 附加:{On(status.Switches.ExtrasSendEnabled)} "
                 + $"应用:{On(status.Switches.AppSendEnabled)} 监听:{On(status.Switches.MonitorEnabled)}({status.MonitorMode}) | {clipState}";
+
+            // live level forensics: shows WHERE clipping happens (docs/01 B08)
+            var metrics = _shell.Session.Metrics();
+            _metricsLabel.Text =
+                $"峰值 {metrics.MixerPeak:0.00} | 削波 {metrics.MixerClippedSamples} | 硬跳变 {metrics.MixerHardSteps} | 欠载 {metrics.MixerUnderrunFrames}";
+            _metricsLabel.ForeColor = metrics.MixerClippedSamples > 0 || metrics.MixerPeak >= 0.99f
+                ? Color.Firebrick
+                : metrics.MixerPeak >= 0.8f ? Color.DarkOrange : SystemColors.ControlText;
             Text = $"随声麦 — {ActivePresetName()}{(Dirty ? " *" : "")}";
         }
         finally
@@ -220,6 +229,7 @@ internal sealed class MainForm : Form
         clipButtons.Dock = DockStyle.Bottom;
 
         _status.Items.Add(_statusLabel);
+        _status.Items.Add(_metricsLabel);
 
         Controls.Add(clipsHost);
         Controls.Add(switches);
