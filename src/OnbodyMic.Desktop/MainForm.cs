@@ -388,7 +388,7 @@ internal sealed class MainForm : Form
         try
         {
             var imported = _shell.Soundboard.Library.Import(dialog.FileName);
-            _shell.Log($"[clip] 已导入 {imported.Item.ClipId}（{imported.Item.DisplayName}）");
+            _shell.Log($"[clip] 已导入 {imported.Item.ClipId}（{imported.Item.DurationMs / 1000.0:F1}s，{imported.Item.Format}）");
         }
         catch (Exception ex)
         {

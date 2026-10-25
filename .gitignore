@@ -6,5 +6,6 @@ obj/
 TestResults/
 packages/
 artifacts/
+dist/
 *.user
 *.suo

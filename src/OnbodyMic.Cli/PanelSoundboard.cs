@@ -46,11 +46,14 @@ internal sealed class Soundboard : IDisposable
 
     public void SaveSettingsPublic() => SaveSettings();
 
+    /// <summary>Shared root resolution: data root for settings, library, cache and diagnostics.</summary>
+    public static string ResolveRoot(string? rootOverride) => rootOverride ?? Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OnbodyMic");
+
     /// <summary>Creates settings + library + cache (phase 1, before the session exists).</summary>
     public static Soundboard Create(string? rootOverride, Action<string> print)
     {
-        var root = rootOverride ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OnbodyMic");
+        var root = ResolveRoot(rootOverride);
         var settingsStore = new GlobalSettingsStore(Path.Combine(root, "settings.json"));
         GlobalSettings settings;
         try

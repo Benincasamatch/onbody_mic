@@ -29,9 +29,11 @@ internal static class Program
                 "loop" => Loop(args[1..]),
                 "mixloop" => MixLoop(args[1..]),
                 "latency" => LatencyProbe(args[1..]),
+                "latmatrix" => LatMatrix(args[1..]),
                 "panel" => PanelApp.Run(args[1..]),
                 "p2smoke" => P2Smoke.Run(args[1..]),
                 "monprobe" => MonitorProbe.Run(args[1..]),
+                "soak" => Soak.Run(args[1..]),
                 _ => Usage(),
             };
         }
@@ -77,6 +79,11 @@ internal static class Program
                     [--presses n] [--out dir]
                                                       automated P2 gate smoke: hotkeys via SendInput under a
                                                       fullscreen surrogate, cable-side forensics, latency P95
+              soak (--render <i> | --render-id <id>) (--capture <i> | --capture-id <id>)
+                    [--mic <i> | --mic-id <id>] [--monitor <i> | --monitor-id <id>]
+                    [--minutes n] [--period-s n] [--tone-s n] [--root dir]
+                                                      T30 continuous-run gate: real adapters, periodic clip plays,
+                                                      memory/counter growth sampling (raw evidence, verdict in report)
             """);
         return 0;
     }
@@ -236,7 +243,7 @@ internal static class Program
         return 0;
     }
 
-    private static Dictionary<string, string> ParseOptions(string[] args)
+    internal static Dictionary<string, string> ParseOptions(string[] args)
     {
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         for (var i = 0; i < args.Length - 1; i++)
@@ -269,7 +276,7 @@ internal static class Program
             : null;
     }
 
-    private static double ParseDouble(Dictionary<string, string> options, string key, double fallback) =>
+    internal static double ParseDouble(Dictionary<string, string> options, string key, double fallback) =>
         double.TryParse(options.GetValueOrDefault(key), out var value) ? value : fallback;
 
     private static int Loop(string[] rest)
