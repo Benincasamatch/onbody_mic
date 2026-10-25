@@ -20,7 +20,11 @@ public sealed class WindowsMonitorCapture : IMonitorCaptureAdapter
             return;
         }
 
-        var capture = WasapiEventCapture.Open(_endpointId, bufferMs: 10, useMixFormat: true);
+        // explicit 44.1 kHz mono PCM16 + AUTOCONVERTPCM (the mic channel's
+        // proven path): the AUX endpoint's mixFormat session has been proven
+        // to misreport/deliver mismatched sample shapes (P3.2 forensics:
+        // mixFormat claimed PCM16 while delivering float — full-scale noise)
+        var capture = WasapiEventCapture.Open(_endpointId, bufferMs: 10, useMixFormat: false);
         capture.Frames += frames => push(frames);
         capture.Faulted += ex =>
         {

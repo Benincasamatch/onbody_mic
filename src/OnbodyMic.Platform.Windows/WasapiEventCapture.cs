@@ -30,6 +30,15 @@ public sealed class WasapiEventCapture : IDisposable
     /// <summary>Actual negotiated format; the mix format's sample rate decides whether resampling is needed.</summary>
     public CaptureFormatInfo Format { get; private set; }
 
+    /// <summary>Per-packet forensics (capture thread only); exposes delivery anomalies like shape flips.</summary>
+    public long PacketsSeen { get; private set; }
+
+    public long MaxPacketFrames { get; private set; }
+
+    public long SilentPackets { get; private set; }
+
+    public long FramesSeen { get; private set; }
+
     public readonly record struct CaptureFormatInfo(int SampleRate, int Channels, bool FloatSamples);
 
     private WasapiEventCapture(
@@ -158,10 +167,23 @@ public sealed class WasapiEventCapture : IDisposable
                     }
 
                     Marshal.ThrowExceptionForHR(_capture.GetBuffer(out var data, out frames, out var flags, out _, out _));
+                    PacketsSeen++;
+                    FramesSeen += frames;
+                    if (frames > MaxPacketFrames)
+                    {
+                        MaxPacketFrames = frames;
+                    }
+
+                    var silent = (flags & 0x2) != 0;
+                    if (silent)
+                    {
+                        SilentPackets++;
+                    }
+
                     var bytes = (int)frames * (_floatSamples ? _channels * 4 : _channels * 2);
                     if (bytes > 0)
                     {
-                        if ((flags & 0x2) != 0 || data == IntPtr.Zero)
+                        if (silent || data == IntPtr.Zero)
                         {
                             // AUDCLNT_BUFFERFLAGS_SILENT: emit zeros in the real shape
                             var count = (int)frames * _channels;

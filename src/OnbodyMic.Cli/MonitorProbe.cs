@@ -16,6 +16,7 @@ internal static class MonitorProbe
         var options = PanelApp.ParseOptions(args);
         var devices = WindowsAudioDevices.List(activeOnly: true);
         var rateOnly = args.Contains("--rate-only");
+        var explicitFormat = args.Contains("--explicit");
         var renderId = rateOnly
             ? null
             : PanelApp.ResolveEndpoint(options, "render-id", "render", devices, capture: false, "虚拟输出（线缆 Render）");
@@ -30,13 +31,10 @@ internal static class MonitorProbe
         Directory.CreateDirectory(outDir);
 
         // 1. negotiated capture format first (no audio yet)
-        using (var probe = WasapiEventCapture.Open(captureId, bufferMs: 10, useMixFormat: true))
+        using (var probe = WasapiEventCapture.Open(captureId, bufferMs: 10, useMixFormat: !explicitFormat))
         {
-            Console.WriteLine($"capture mix format: {probe.Format.SampleRate} Hz, {probe.Format.Channels} ch, float={probe.Format.FloatSamples}");
-            if (probe.Format.SampleRate != 44100)
-            {
-                Console.WriteLine($"!! 采样率 != 引擎 44100 —— 现网产品路径按 44100 消费此流：速率错配 {(double)probe.Format.SampleRate / 44100:0.000}x，监听环将持续修剪/跳变（'炸'音根源）");
-            }
+            Console.WriteLine($"capture format ({(explicitFormat ? "explicit 44.1k mono PCM16" : "mixFormat")}): "
+                + $"{probe.Format.SampleRate} Hz, {probe.Format.Channels} ch, float={probe.Format.FloatSamples}");
         }
 
         if (rateOnly)
@@ -46,7 +44,7 @@ internal static class MonitorProbe
 
         // 2. play sine on the exclusive render path while capturing
         var samples = new List<float>();
-        var capture = WasapiEventCapture.Open(captureId, bufferMs: 10, useMixFormat: true);
+        var capture = WasapiEventCapture.Open(captureId, bufferMs: 10, useMixFormat: !explicitFormat);
         capture.Frames += frames =>
         {
             lock (samples)
@@ -85,10 +83,32 @@ internal static class MonitorProbe
             captured = samples.ToArray();
         }
 
+        Console.WriteLine(
+            $"packets={capture.PacketsSeen} maxPacket={capture.MaxPacketFrames} silent={capture.SilentPackets} frames={capture.FramesSeen}");
+        var peak = captured.Length == 0 ? 0 : captured.Max(Math.Abs);
+        var clipped = captured.Count(v => v >= 0.999f || v <= -0.999f);
+        var zeroCrossings = 0;
+        for (var i = 1; i < captured.Length; i++)
+        {
+            if ((captured[i - 1] < 0) != (captured[i] < 0))
+            {
+                zeroCrossings++;
+            }
+        }
+
+        var measuredHz = zeroCrossings / 2.0 / ((double)captured.Length / 44100);
+        Console.WriteLine($"captured {captured.Length} frames, peak={peak:0.000}, clipped={clipped}, zeroCrossRate={measuredHz:0.0} Hz (期望 {freq:0} Hz)");
+        if (peak > 0.9 && measuredHz > freq * 1.5)
+        {
+            Console.WriteLine("!! 波形异常：符号翻转频率远超音源频率——数据形状/交错损坏（'炸'音实锤），问题在采集交付层");
+        }
+        else if (peak > 0.9)
+        {
+            Console.WriteLine("采集数据波形正常——损坏点不在 capture 交付层，需查监听输出侧");
+        }
+
         var wav = Path.Combine(outDir, "monprobe_capture.wav");
         WriteWav(wav, captured, 44100);
-        var peak = captured.Length == 0 ? 0 : captured.Max(Math.Abs);
-        Console.WriteLine($"captured {captured.Length} frames ({(double)captured.Length / 44100:0.00}s @44100 记账), peak={peak:0.000}");
         Console.WriteLine($"wav: {wav}");
         Console.WriteLine($"分析: onbody analyze --file \"{wav}\" --freq {freq:0}");
         return 0;

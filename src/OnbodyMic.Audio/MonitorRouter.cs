@@ -127,12 +127,12 @@ public sealed class MonitorRouter
                 if (_primed)
                 {
                     // adaptive rate (P1.1 mechanism): hold the ring near the
-                    // target water level by stretching/squeezing ±1%; absorbs
-                    // the ppm-scale drift between capture and monitor output
-                    // clocks without queue growth or starvation
+                    // target water level by stretching/squeezing ±2%; absorbs
+                    // the drift between capture and monitor output clocks
+                    // without queue growth or starvation (2% pitch is inaudible)
                     var available = _writePos - _readPos;
                     var error = available - _targetFrames;
-                    var ratio = 1.0 + Math.Clamp(error / _targetFrames * 0.01, -0.01, 0.01);
+                    var ratio = 1.0 + Math.Clamp(error / _targetFrames * 0.01, -0.02, 0.02);
                     while (emitted < frames && _writePos - _readPos >= 1)
                     {
                         var index0 = (int)(_readPos % _capacity);
