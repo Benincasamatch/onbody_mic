@@ -385,7 +385,7 @@ internal static class Program
         Thread.Sleep(300);
 
         var cableFloat = WaveFormat.CreateIeeeFloatWaveFormat(rate, 2);
-        var micResampled = new MediaFoundationResampler(micBuffer, cableFloat).ToSampleProvider();
+        var micResampled = new WdlResamplingSampleProvider(micBuffer.ToSampleProvider(), rate);
         var micScaled = new VolumeSampleProvider(micResampled) { Volume = (float)micGain };
         var beepHz = ParseDouble(options, "beep", 0);
         var sine = new SineWaveProvider(frequency, gain, cableFloat, beepHz).ToSampleProvider();
@@ -416,11 +416,35 @@ internal static class Program
         }
         else if (monitorMode == "cable" && monitorBuffer is not null)
         {
-            var monitorStereo = WaveFormat.CreateIeeeFloatWaveFormat(rate, 2);
             monitorOut = new WasapiOut(AudioClientShareMode.Shared, monitorLatencyMs);
-            monitorOut.Init(new MediaFoundationResampler(monitorBuffer, monitorStereo));
+            monitorOut.Init(new SampleToWaveProvider(new MonoToStereoSampleProvider(monitorBuffer.ToSampleProvider())));
             monitorOut.Play();
         }
+
+        // jitter control: elastic buffers must hold a few periods, never a standing backlog.
+        // Startup bursts can fill them to the cap (the reported ~1s self-voice delay); trim
+        // continuously and print depths so the bound stays observable.
+        var trimStop = new ManualResetEvent(false);
+        var micScratch = new byte[16 * 1024];
+        var trimThread = new Thread(() =>
+        {
+            var statsAt = Stopwatch.GetTimestamp();
+            var micDiscardedMs = 0.0;
+            while (!trimStop.WaitOne(40))
+            {
+                micDiscardedMs += TrimTo(micBuffer, TimeSpan.FromMilliseconds(80), micScratch);
+                tap?.TrimSinks(TimeSpan.FromMilliseconds(60));
+                var now = Stopwatch.GetTimestamp();
+                if ((now - statsAt) * 1000.0 / Stopwatch.Frequency >= 1000)
+                {
+                    Console.WriteLine($"buffers_ms mic={micBuffer.BufferedDuration.TotalMilliseconds:F0} monitor={(tap?.SinkDepthMs() ?? -1):F0} discard_ms_per_s={micDiscardedMs:F1}");
+                    micDiscardedMs = 0;
+                    statsAt = now;
+                }
+            }
+        })
+        { IsBackground = true };
+        trimThread.Start();
 
         Console.WriteLine($"mixing mic + {frequency:N0} Hz -> {renderDevice.FriendlyName} (exclusive {rate} Hz)");
         Console.WriteLine($"verifying from cable capture: {cableDevice.FriendlyName}");
@@ -431,6 +455,8 @@ internal static class Program
 
         Console.WriteLine("speak into the mic during this run ...");
         Thread.Sleep(TimeSpan.FromSeconds(seconds - 1));
+        trimStop.Set();
+        trimThread.Join(500);
         output.Stop();
         monitorOut?.Stop();
         monitorOut?.Dispose();
@@ -536,6 +562,26 @@ internal static class Program
         return 0;
     }
 
+
+    private static double TrimTo(BufferedWaveProvider buffer, TimeSpan target, byte[] scratch)
+    {
+        var bytesPerMs = buffer.WaveFormat.AverageBytesPerSecond / 1000.0;
+        var targetBytes = (int)(target.TotalSeconds * buffer.WaveFormat.AverageBytesPerSecond);
+        var discarded = 0;
+        while (buffer.BufferedBytes > targetBytes)
+        {
+            var take = Math.Min(scratch.Length, buffer.BufferedBytes - targetBytes);
+            var read = buffer.Read(scratch, 0, take);
+            if (read <= 0)
+            {
+                break;
+            }
+
+            discarded += read;
+        }
+
+        return discarded / bytesPerMs;
+    }
     private static double GoertzelPower(List<float> samples, int sampleRate, double frequency)
     {
         var k = (int)Math.Round(frequency * samples.Count / sampleRate);
@@ -771,4 +817,25 @@ internal sealed class BroadcastWaveProvider(IWaveProvider source) : IWaveProvide
 
         return read;
     }
+
+    public void TrimSinks(TimeSpan target)
+    {
+        foreach (var sink in _sinks)
+        {
+            var targetBytes = (int)(target.TotalSeconds * sink.WaveFormat.AverageBytesPerSecond);
+            var scratch = new byte[16 * 1024];
+            while (sink.BufferedBytes > targetBytes)
+            {
+                var take = Math.Min(scratch.Length, sink.BufferedBytes - targetBytes);
+                if (sink.Read(scratch, 0, take) <= 0)
+                {
+                    break;
+                }
+            }
+        }
+    }
+
+    public double SinkDepthMs() => _sinks.Count == 0
+        ? 0
+        : _sinks.Average(s => s.BufferedBytes * 1000.0 / s.WaveFormat.AverageBytesPerSecond);
 }
