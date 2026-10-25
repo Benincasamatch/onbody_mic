@@ -31,6 +31,7 @@ public sealed class HotkeyDispatcherTests : IDisposable
         _session = new AudioSession(new AudioSessionOptions
         {
             ClipDecoder = _decoder,
+            ClipBoundaryFadeFrames = 0, // exact-value assertions
             SampleStore = _store,
             ClipResolver = id => _resolutions.TryGetValue(id, out var resolution) ? resolution : ClipResolution.Unknown,
             MicAdapterFactory = channel =>

@@ -513,6 +513,7 @@ public sealed class AudioSessionTests
             var session = new AudioSession(new AudioSessionOptions
             {
                 ClipDecoder = decoder,
+                ClipBoundaryFadeFrames = 0, // exact-value assertions; fades covered in ClipPlayerTests
                 MicAdapterFactory = channel =>
                 {
                     mic.Channel = channel;

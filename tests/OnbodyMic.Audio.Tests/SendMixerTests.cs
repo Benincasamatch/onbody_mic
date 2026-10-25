@@ -119,8 +119,8 @@ public sealed class SendMixerTests
     [Fact]
     public void Clip_feed_without_ticket_never_reaches_output()
     {
-        var player = new ClipPlayer();
-        var feed = new ClipFeed(player);
+        var player = new ClipPlayer(fadeFrames: 0);
+        var feed = new ClipFeed(player, 4410, 2205);
         player.Start("clip-a", new float[] { 0.5f, 0.5f, 0.5f }, playbackEpoch: 1, ClipPlaybackMode.Preview);
 
         var switches = SessionSwitches.AllOff with { ExtrasSendEnabled = true };

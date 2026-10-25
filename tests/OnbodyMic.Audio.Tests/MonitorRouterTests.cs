@@ -8,24 +8,33 @@ public sealed class MonitorRouterTests
     [Fact]
     public void Disabled_router_emits_silence()
     {
-        var (router, _) = Build(new MonitorRouteState(false, MonitorMode.ClipOnly), RouteGains.Unity);
+        var (router, _, _) = Build(new MonitorRouteState(false, MonitorMode.ClipOnly), RouteGains.Unity);
         var output = new float[4];
         Assert.Equal(0, router.Read(output));
         Assert.All(output, value => Assert.Equal(0f, value));
     }
 
     [Fact]
-    public void ClipOnly_taps_only_the_send_clip_player()
+    public void ClipOnly_taps_the_authorized_send_pulls_without_double_pulling()
     {
-        var player = new ClipPlayer();
+        var player = new ClipPlayer(fadeFrames: 0);
         player.Start("clip-a", new float[] { 0.5f, 0.5f }, playbackEpoch: 1, ClipPlaybackMode.Send);
-        var (router, _) = Build(new MonitorRouteState(true, MonitorMode.ClipOnly), RouteGains.Unity, player);
+        var (router, _, feed) = Build(new MonitorRouteState(true, MonitorMode.ClipOnly), RouteGains.Unity, player);
+
+        var mixed = new float[2];
+        Assert.Equal(2, feed.Pull(mixed, 2)); // the mixer's authorized pull fills the tap
 
         var output = new float[2];
         var emitted = router.Read(output);
 
         Assert.Equal(2, emitted);
-        Assert.Equal(new float[] { 0.5f, 0.5f }, output);
+        Assert.Equal(new float[] { 0.5f, 0.5f }, output); // monitor heard exactly what was sent
+
+        // regression (P2 pop report): the monitor read must not have advanced
+        // the playhead — the next mixer pull sees the clip exhausted
+        var next = new float[2];
+        Assert.Equal(0, feed.Pull(next, 2));
+        Assert.All(next, value => Assert.Equal(0f, value));
     }
 
     [Fact]
@@ -33,9 +42,9 @@ public sealed class MonitorRouterTests
     {
         // engine semantics: preview suspends MonitorEnabled, but the audition
         // itself must still be audible on the local monitor device
-        var player = new ClipPlayer();
+        var player = new ClipPlayer(fadeFrames: 0);
         player.Start("clip-a", new float[] { 0.25f }, playbackEpoch: 1, ClipPlaybackMode.Preview);
-        var (router, _) = Build(new MonitorRouteState(false, MonitorMode.ClipOnly), RouteGains.Unity, player);
+        var (router, _, _) = Build(new MonitorRouteState(false, MonitorMode.ClipOnly), RouteGains.Unity, player);
 
         var output = new float[1];
         Assert.Equal(1, router.Read(output));
@@ -45,7 +54,7 @@ public sealed class MonitorRouterTests
     [Fact]
     public void FullEndpoint_reads_pushed_frames_and_applies_monitor_gain()
     {
-        var (router, _) = Build(new MonitorRouteState(true, MonitorMode.FullEndpoint), new RouteGains(1, 1, 1, 0.5f));
+        var (router, _, _) = Build(new MonitorRouteState(true, MonitorMode.FullEndpoint), new RouteGains(1, 1, 1, 0.5f));
         router.PushFullEndpoint(new float[] { 0.4f, 0.8f });
 
         var output = new float[2];
@@ -60,8 +69,8 @@ public sealed class MonitorRouterTests
     public void FullEndpoint_ring_is_bounded_and_trims_drift()
     {
         var capacity = EngineFormat.TimeToFrames(TimeSpan.FromMilliseconds(300));
-        var player = new ClipPlayer();
-        var router = new MonitorRouter(player, capacity, capacity / 2)
+        var feed = new ClipFeed(new ClipPlayer(fadeFrames: 0), capacity, capacity / 2);
+        var router = new MonitorRouter(feed, capacity, capacity / 2)
         {
             StateProvider = () => new MonitorRouteState(true, MonitorMode.FullEndpoint),
             GainsProvider = () => RouteGains.Unity,
@@ -83,23 +92,24 @@ public sealed class MonitorRouterTests
     [Fact]
     public void FullEndpoint_starvation_emits_silence()
     {
-        var (router, _) = Build(new MonitorRouteState(true, MonitorMode.FullEndpoint), RouteGains.Unity);
+        var (router, _, _) = Build(new MonitorRouteState(true, MonitorMode.FullEndpoint), RouteGains.Unity);
         var output = new float[4];
         Assert.Equal(0, router.Read(output));
         Assert.All(output, value => Assert.Equal(0f, value));
     }
 
-    private static (MonitorRouter Router, ClipPlayer Player) Build(
+    private static (MonitorRouter Router, ClipPlayer Player, ClipFeed Feed) Build(
         MonitorRouteState state,
         RouteGains gains,
         ClipPlayer? player = null)
     {
-        var clipPlayer = player ?? new ClipPlayer();
-        var router = new MonitorRouter(clipPlayer, 4410, 2205)
+        var clipPlayer = player ?? new ClipPlayer(fadeFrames: 0);
+        var feed = new ClipFeed(clipPlayer, 4410, 2205);
+        var router = new MonitorRouter(feed, 4410, 2205)
         {
             StateProvider = () => state,
             GainsProvider = () => gains,
         };
-        return (router, clipPlayer);
+        return (router, clipPlayer, feed);
     }
 }

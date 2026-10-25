@@ -36,7 +36,7 @@ internal static class P2Smoke
 
         public void Start(string captureEndpointId)
         {
-            _capture = WasapiEventCapture.Open(captureEndpointId, bufferMs: 10, useMixFormat: true);
+            _capture = WasapiEventCapture.Open(captureEndpointId, bufferMs: 10, useMixFormat: false);
             _capture.Frames += frames =>
             {
                 var copy = new float[frames.Length];
@@ -59,6 +59,7 @@ internal static class P2Smoke
             }
         }
     }
+
 
     public static int Run(string[] args)
     {
@@ -113,7 +114,7 @@ internal static class P2Smoke
             var path = library.AssetAbsolutePath(item);
             return new ClipResolution(true, File.Exists(path), path, item.Gain);
         }
-
+        TeedExclusiveOutput? teed = null;
         using var session = new AudioSession(new AudioSessionOptions
         {
             ClipDecoder = decoder,
@@ -123,7 +124,7 @@ internal static class P2Smoke
                 ? throw new NotSupportedException("mic not configured for this smoke run")
                 : new WindowsMicSource(micId, channel),
             AppAdapterFactory = (channel, binding) => new WindowsAppSource(binding, channel),
-            OutputFactory = () => new WasapiExclusiveRenderPump(renderId),
+            OutputFactory = () => teed = new TeedExclusiveOutput(new WasapiExclusiveRenderPump(renderId)),
             MonitorOutputFactory = () => new WindowsMonitorOutput(renderId),
         });
         var attach = session.AttachOutput();
@@ -321,11 +322,17 @@ internal static class P2Smoke
         }
 
         Thread.Sleep(300);
-        var chunks = recorder.Stop();
+        var captureChunks = recorder.Stop();
 
-        // ---- analysis ----
+        // ---- analysis on the ENGINE TEE: the exact frames written to the
+        // exclusive render endpoint (what the cable carries). The hidden AUX
+        // capture endpoint's shared format proved unstable mid-session
+        // (stereo flip, then a 0.72x realtime slowdown with an explicit
+        // format — the P0B-documented driver penalty factor), so capture-side
+        // recordings are kept as evidence WAVs only, never as assertions.
+        var chunks = teed!.Chunks();
         var total = chunks.Sum(c => c.Samples.Length);
-        Console.WriteLine($"capture: {chunks.Count} chunks, {total} frames ({total / (double)Rate:F2}s)");
+        Console.WriteLine($"engine-tee: {chunks.Count} pulls, {total} frames ({total / (double)Rate:F2}s)");
         var flat = chunks.SelectMany(c => c.Samples).ToArray();
 
         var playTriggers = TicksOf(triggerLog, HotkeyAction.PlayClip, skipBefore: playStart - 1000);
@@ -357,6 +364,31 @@ internal static class P2Smoke
         else if (!keysMode && p95 > 150)
         {
             failures.Add($"engine-path P95 {p95:F0}ms exceeds the 150 ms sanity bound");
+        }
+
+        // boundary-pop forensics with abrupt material: every inter-sample
+        // step above the bound is a candidate pop (material itself is a sine
+        // at 0.4, natural step <= ~0.06; boundary fades keep steps < 0.01)
+        var hardSteps = 0;
+        var maxStep = 0f;
+        for (var i = 1; i < flat.Length; i++)
+        {
+            var step = Math.Abs(flat[i] - flat[i - 1]);
+            if (step > maxStep)
+            {
+                maxStep = step;
+            }
+
+            if (step > 0.12)
+            {
+                hardSteps++;
+            }
+        }
+
+        Console.WriteLine($"hard-step scan: count(>0.12)={hardSteps} maxStep={maxStep:F3}");
+        if (hardSteps > 0)
+        {
+            failures.Add($"{hardSteps} hard inter-sample steps (>0.12) — boundary pops with abrupt material");
         }
 
         var toneRatio = GoertzelRatio(flat, ToneHz);
@@ -448,8 +480,11 @@ internal static class P2Smoke
             }
         }
 
-        var evidence = Path.GetFullPath(Path.Combine(outDir, "p2smoke_capture.wav"));
+        var evidence = Path.GetFullPath(Path.Combine(outDir, "p2smoke_engine.wav"));
         WriteWav16(evidence, flat);
+        var captureSide = Path.GetFullPath(Path.Combine(outDir, "p2smoke_capture.wav"));
+        WriteWav16(captureSide, captureChunks.SelectMany(c => c.Samples).ToArray());
+        Console.WriteLine($"取证 WAV: 引擎侧 {evidence}；线缆侧 {captureSide}（线缆侧格式不稳定，仅存档不断言）");
         Console.WriteLine();
         Console.WriteLine(failures.Count == 0
             ? $"P2SMOKE PASS（取证 WAV: {evidence}）"
@@ -461,6 +496,45 @@ internal static class P2Smoke
 
         return failures.Count == 0 ? 0 : 1;
     }
+
+    /// <summary>Tees the exact frames the exclusive pump writes, with pull timestamps — the forensic ground truth of what reaches the cable.</summary>
+    private sealed class TeedExclusiveOutput(IVirtualAudioOutput inner) : IVirtualAudioOutput
+    {
+        private readonly object _gate = new();
+        private readonly List<RecordingChunk> _chunks = [];
+
+        public event Action<Exception>? Faulted
+        {
+            add => inner.Faulted += value;
+            remove => inner.Faulted -= value;
+        }
+
+        public void Start(PullFrames pull) => inner.Start(destination =>
+        {
+            var taken = pull(destination);
+            lock (_gate)
+            {
+                _chunks.Add(new RecordingChunk(Environment.TickCount64, [.. destination]));
+            }
+
+            return taken;
+        });
+
+        public void Stop() => inner.Stop();
+
+        public List<RecordingChunk> Chunks()
+        {
+            lock (_gate)
+            {
+                return [.. _chunks];
+            }
+        }
+
+        public float[] Drain() => Chunks().SelectMany(c => c.Samples).ToArray();
+
+        public void Dispose() => inner.Dispose();
+    }
+
     /// <summary>
     /// Tries several probe gestures at the service level; reports each
     /// outcome (bind conflict vs. silent) so a taken gesture is never
@@ -634,24 +708,14 @@ internal static class P2Smoke
 
     private static string WriteToneWav(string path)
     {
+        // deliberately abrupt edges (no envelope): real soundboard material
+        // starts and ends at full amplitude, and the boundary-fade guards
+        // must prove themselves against the worst case, not a ramped test tone
         var frames = Rate * ToneMs / 1000;
         var samples = new float[frames];
-        var ramp = Rate * 5 / 1000;
         for (var i = 0; i < frames; i++)
         {
-            var tone = 0.4 * Math.Sin(2.0 * Math.PI * ToneHz * i / Rate);
-            double envelope = 1;
-            if (i < ramp)
-            {
-                envelope = (double)i / ramp;
-            }
-
-            if (i > frames - ramp)
-            {
-                envelope = (double)(frames - i) / ramp;
-            }
-
-            samples[i] = (float)(tone * envelope);
+            samples[i] = (float)(0.4 * Math.Sin(2.0 * Math.PI * ToneHz * i / Rate));
         }
 
         WriteWav16(path, samples);

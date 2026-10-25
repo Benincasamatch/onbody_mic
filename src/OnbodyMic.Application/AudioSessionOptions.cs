@@ -15,6 +15,9 @@ public sealed class AudioSessionOptions
     /// <summary>Full-predecode clip decoder used on cache misses.</summary>
     public required IClipDecoder ClipDecoder { get; init; }
 
+    /// <summary>Boundary ramp for clip start/stop/replace/natural end; 0 disables (exact-value tests).</summary>
+    public int ClipBoundaryFadeFrames { get; init; } = ClipPlayer.DefaultFadeFrames;
+
     /// <summary>Creates the microphone adapter bound to the mic channel.</summary>
     public required Func<SourceChannel, IAudioSourceAdapter> MicAdapterFactory { get; init; }
 

@@ -46,8 +46,8 @@ public sealed class AudioSession : IDisposable
             _appChannel.EnableAdaptiveRate(options.AppAdaptiveTargetFrames);
         }
         _runtime = BuildRuntime();
-        _clipPlayer = new ClipPlayer();
-        _clipFeed = new ClipFeed(_clipPlayer);
+        _clipPlayer = new ClipPlayer(options.ClipBoundaryFadeFrames);
+        _clipFeed = new ClipFeed(_clipPlayer, options.MonitorRingFrames, options.MonitorHighWaterFrames);
         _clipPlayer.PlaybackCompleted += clip =>
             _commands.Post("clip-completed", () => HandleClipCompleted(clip));
 
@@ -61,7 +61,7 @@ public sealed class AudioSession : IDisposable
         _mixer.Add(_appChannel);
         _mixer.Add(_clipFeed);
 
-        _monitorRouter = new MonitorRouter(_clipPlayer, options.MonitorRingFrames, options.MonitorHighWaterFrames)
+        _monitorRouter = new MonitorRouter(_clipFeed, options.MonitorRingFrames, options.MonitorHighWaterFrames)
         {
             StateProvider = () => _runtime.Monitor,
             GainsProvider = () => _runtime.Gains,

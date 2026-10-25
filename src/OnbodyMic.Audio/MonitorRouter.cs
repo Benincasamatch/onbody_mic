@@ -24,16 +24,18 @@ public sealed class MonitorRouter
     private const int PlayerChunkFrames = 2048;
     private readonly float[] _playerScratch = new float[PlayerChunkFrames];
 
-    public MonitorRouter(ClipPlayer player, int capacityFrames, int highWaterFrames)
+    public MonitorRouter(ClipFeed feed, int capacityFrames, int highWaterFrames)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(capacityFrames, 1);
-        Player = player;
+        Feed = feed;
         _ring = new float[capacityFrames];
         _capacity = capacityFrames;
         _highWaterFrames = Math.Min(highWaterFrames, capacityFrames);
     }
 
-    public ClipPlayer Player { get; }
+    public ClipFeed Feed { get; }
+
+    private ClipPlayer Player => Feed.Player;
 
     /// <summary>Current monitor route state provider (immutable snapshot).</summary>
     public required Func<MonitorRouteState> StateProvider { get; init; }
@@ -80,10 +82,9 @@ public sealed class MonitorRouter
         }
         else if (state.Enabled && state.Mode == MonitorMode.ClipOnly)
         {
-            if (Player.Active is { Mode: ClipPlaybackMode.Send })
-            {
-                emitted = ReadPlayer(destination);
-            }
+            // tap of the authorized send-side pulls: exactly what is being
+            // sent, never a second consumer on the player's playhead
+            emitted = Feed.ReadTap(destination);
         }
         else if (state.Enabled && state.Mode == MonitorMode.FullEndpoint)
         {
@@ -142,7 +143,7 @@ public sealed class MonitorRouter
         return emitted;
     }
 
-    /// <summary>Clears buffered FullEndpoint frames (monitor off, mode switch, emergency).</summary>
+    /// <summary>Clears buffered frames (monitor off, mode switch, emergency).</summary>
     public void Clear()
     {
         lock (_gate)
@@ -151,6 +152,8 @@ public sealed class MonitorRouter
             _head = 0;
             _count = 0;
         }
+
+        Feed.ClearTap();
     }
 
     public MonitorRouterStats Stats()
