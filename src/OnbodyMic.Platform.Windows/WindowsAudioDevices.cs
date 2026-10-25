@@ -36,6 +36,21 @@ public static class WindowsAudioDevices
         return result;
     }
 
+    public static string? DefaultDeviceId(bool capture)
+    {
+        using var enumerator = new MMDeviceEnumerator();
+        try
+        {
+            using var device = enumerator.GetDefaultAudioEndpoint(
+                capture ? DataFlow.Capture : DataFlow.Render, Role.Multimedia);
+            return device?.ID;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     public static MMDevice OpenById(string id)
     {
         var enumerator = new MMDeviceEnumerator();

@@ -28,6 +28,7 @@ internal static class Program
                 "loop" => Loop(args[1..]),
                 "mixloop" => MixLoop(args[1..]),
                 "latency" => LatencyProbe(args[1..]),
+                "proloop" => ProcLoop(args[1..]),
                 _ => Usage(),
             };
         }
@@ -58,6 +59,8 @@ internal static class Program
                                                       mic+sfx mixed into the cable, verified at the capture side
                     [--monitor local|cable] [--render-latency ms] [--monitor-latency ms]
               analyze --file <f.wav> [--freq hz] [--peaks] [--onset <thr>]
+              proloop --pid <n> --out <file.wav> [--seconds s] [--mode include|exclude]
+                                                      per-process loopback capture to wav (T04/T05)
               enable --id <id> | disable --id <id>    toggle a disabled MMDevice endpoint (IPolicyConfig)
               setformat --id <id> --rate <hz> [--channels c]
                                                       set endpoint shared-mode format to float32 (IPolicyConfig)
@@ -68,11 +71,14 @@ internal static class Program
     private static int ListDevices(bool activeOnly, bool showIds)
     {
         var devices = WindowsAudioDevices.List(activeOnly);
-        Console.WriteLine("idx flow     state   name");
+        var defaultRender = WindowsAudioDevices.DefaultDeviceId(capture: false);
+        var defaultCapture = WindowsAudioDevices.DefaultDeviceId(capture: true);
+        Console.WriteLine("idx flow     state   name (* = default)");
         for (var i = 0; i < devices.Count; i++)
         {
             var device = devices[i];
-            Console.WriteLine($"{i,3} {device.DataFlow,-8} {device.State,-7} {device.FriendlyName}");
+            var marker = device.Id == (device.DataFlow == "Capture" ? defaultCapture : defaultRender) ? "*" : " ";
+            Console.WriteLine($"{i,3} {device.DataFlow,-8} {device.State,-7}{marker}{device.FriendlyName}");
             if (showIds)
             {
                 Console.WriteLine($"      id={device.Id}");
@@ -467,6 +473,35 @@ internal static class Program
         writer.Flush();
 
         Console.WriteLine($"elapsed_ms={(Stopwatch.GetTimestamp() - startedAt) * 1000.0 / Stopwatch.Frequency:F1}");
+        return 0;
+    }
+
+    private static int ProcLoop(string[] rest)
+    {
+        var options = ParseOptions(rest);
+        if (!options.TryGetValue("pid", out var pidText) || !uint.TryParse(pidText, out var pid) ||
+            !options.TryGetValue("out", out var outFile))
+        {
+            Console.Error.WriteLine("proloop requires --pid <n> --out <file.wav> [--seconds s] [--mode include|exclude]");
+            return 1;
+        }
+
+        var seconds = ParseDouble(options, "seconds", 6);
+        if (seconds <= 0)
+        {
+            Console.Error.WriteLine("seconds must be positive");
+            return 1;
+        }
+
+        var include = !options.GetValueOrDefault("mode", "include").Equals("exclude", StringComparison.OrdinalIgnoreCase);
+        using var capture = new ProcessLoopbackCapture();
+        using var writer = new WaveFileWriter(outFile, capture.WaveFormat);
+        capture.DataAvailable += (buffer, count) => writer.Write(buffer, 0, count);
+        capture.Start(pid, include);
+        Console.WriteLine($"capturing pid={pid} mode={(include ? "include-tree" : "exclude-tree")} format={capture.WaveFormat}");
+        Thread.Sleep(TimeSpan.FromSeconds(seconds));
+        capture.Stop();
+        writer.Flush();
         return 0;
     }
 

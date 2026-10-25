@@ -18,6 +18,8 @@
 
 > 2026-10-25 更新（三）：KOOK 0.112.0 已确认持续接收虚拟麦（会话枚举证据 + 用户实测听到哔声与人声），T02/T03 实质通过；KOOK 回声链路 69ms，自声音延迟经 `--monitor local`（混音直通监听）降至 ~50-70ms。详见 [开发日志](devlog/2026-10-25-p0a-p0b-mvp.md)。
 
+> 2026-10-25 更新（四）：单应用隔离验证通过（T04/T05）。自写 per-process loopback interop（`ActivateAudioInterfaceAsync` + `VAD\Process_Loopback`），700Hz 目标进程树捕获干净检出 700Hz、并发 1200Hz 完全不可见、静音对照无泄漏。P0B 剩：浏览器双标签页边界（T06，需用户配合）、延迟矩阵、KOOK 语音处理配置（T27）。详见 [开发日志](devlog/2026-10-25-p0a-p0b-mvp.md)。
+
 ## 文档导航
 
 | 文档 | 内容 |
