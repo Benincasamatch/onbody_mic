@@ -29,6 +29,7 @@ internal static class Program
                 "mixloop" => MixLoop(args[1..]),
                 "latency" => LatencyProbe(args[1..]),
                 "proloop" => ProcLoop(args[1..]),
+                "latmatrix" => LatMatrix(args[1..]),
                 _ => Usage(),
             };
         }
@@ -61,6 +62,9 @@ internal static class Program
               analyze --file <f.wav> [--freq hz] [--peaks] [--onset <thr>]
               proloop --pid <n> --out <file.wav> [--seconds s] [--mode include|exclude]
                                                       per-process loopback capture to wav (T04/T05)
+              latmatrix (--render <i> | --render-id <id>) (--capture <i> | --capture-id <id>)
+                    [--bursts n] [--period-ms n] [--burst-ms n]
+                                                      200-burst engine->virtual-input latency matrix
               enable --id <id> | disable --id <id>    toggle a disabled MMDevice endpoint (IPolicyConfig)
               setformat --id <id> --rate <hz> [--channels c]
                                                       set endpoint shared-mode format to float32 (IPolicyConfig)
@@ -367,7 +371,7 @@ internal static class Program
         var startedAt = Stopwatch.GetTimestamp();
 
         // verification capture: exactly what KOOK would hear from the cable
-        using var cableCapture = new WasapiCapture(cableDevice);
+        using var cableCapture = new WasapiCapture(cableDevice, true, 20);
         using var writer = new WaveFileWriter(outFile, cableCapture.WaveFormat);
         var monitorBuffer = monitorMode == "cable"
             ? new BufferedWaveProvider(cableCapture.WaveFormat) { DiscardOnBufferOverflow = true, BufferDuration = TimeSpan.FromSeconds(2) }
@@ -380,7 +384,7 @@ internal static class Program
         cableCapture.StartRecording();
 
         // live mic buffered, then resampled into the cable's exclusive format
-        using var micCapture = new WasapiCapture(micDevice);
+        using var micCapture = new WasapiCapture(micDevice, true, 20);
         var micBuffer = new BufferedWaveProvider(micCapture.WaveFormat)
         {
             DiscardOnBufferOverflow = true,
@@ -399,7 +403,7 @@ internal static class Program
         mixer.AddMixerInput(micScaled);
         mixer.AddMixerInput(sine);
 
-        using var output = new WasapiOut(renderDevice, AudioClientShareMode.Exclusive, false, renderLatencyMs);
+        using var output = new WasapiOut(renderDevice, AudioClientShareMode.Exclusive, true, renderLatencyMs);
         var mixStream = new SampleToWaveProvider16(mixer);
         BroadcastWaveProvider? tap = null;
         if (monitorMode == "local")
@@ -473,6 +477,101 @@ internal static class Program
         writer.Flush();
 
         Console.WriteLine($"elapsed_ms={(Stopwatch.GetTimestamp() - startedAt) * 1000.0 / Stopwatch.Frequency:F1}");
+        return 0;
+    }
+
+    private static int LatMatrix(string[] rest)
+    {
+        var options = ParseOptions(rest);
+        var hasRender = options.ContainsKey("render") || options.ContainsKey("render-id");
+        var hasCable = options.ContainsKey("capture") || options.ContainsKey("capture-id");
+        if (!hasRender || !hasCable)
+        {
+            Console.Error.WriteLine("latmatrix requires (--render <i> | --render-id <id>) (--capture <i> | --capture-id <id>)");
+            return 1;
+        }
+
+        var burstCount = (int)ParseDouble(options, "bursts", 200);
+        var periodMs = (int)ParseDouble(options, "period-ms", 250);
+        var burstMs = (int)ParseDouble(options, "burst-ms", 30);
+        var rate = 44100;
+        if (burstCount < 10 || periodMs < 100 || burstMs is < 5 or > 100)
+        {
+            Console.Error.WriteLine("bursts>=10, period-ms>=100, burst-ms 5..100");
+            return 1;
+        }
+
+        using var renderDevice = ResolveDevice(options, "render", "render-id", capture: false);
+        using var cableDevice = ResolveDevice(options, "capture", "capture-id", capture: true);
+        if (renderDevice is null || cableDevice is null)
+        {
+            Console.Error.WriteLine("render or cable capture endpoint not found");
+            return 1;
+        }
+
+        var provider = new BurstWaveProvider(rate, 2, 440, 0.35, burstMs, periodMs);
+        var onsets = new List<long>();
+        long totalSamples = 0;
+        long lastOnsetSample = -2 * (long)(0.08 * rate);
+        float maxAbs = 0;
+        var quietGap = (long)(0.08 * rate);
+        var threshold = 0.1f;
+
+        var captureBufferMs = (int)ParseDouble(options, "capture-latency", 20);
+        using var cableCapture = new WasapiCapture(cableDevice, true, captureBufferMs);
+        cableCapture.DataAvailable += (_, e) =>
+        {
+            var samples = e.BytesRecorded / sizeof(float);
+            var tick = Stopwatch.GetTimestamp();
+            for (var i = 0; i < samples; i++)
+            {
+                var value = Math.Abs(BitConverter.ToSingle(e.Buffer, i * sizeof(float)));
+                maxAbs = Math.Max(maxAbs, value);
+                var position = totalSamples + i;
+                if (value > threshold && position - lastOnsetSample >= quietGap)
+                {
+                    onsets.Add(tick);
+                    lastOnsetSample = position;
+                }
+            }
+
+            totalSamples += samples;
+        };
+        cableCapture.StartRecording();
+        Thread.Sleep(500);
+
+        var renderEventSync = options.GetValueOrDefault("render-event", "on").Equals("on", StringComparison.OrdinalIgnoreCase);
+        var renderBufferMs = (int)ParseDouble(options, "render-latency", 20);
+        using var output = new WasapiOut(renderDevice, AudioClientShareMode.Exclusive, renderEventSync, renderBufferMs);
+        output.Init(provider);
+        output.Play();
+
+        var expectedSeconds = burstCount * periodMs / 1000.0 + 1;
+        Thread.Sleep(TimeSpan.FromSeconds(expectedSeconds));
+        output.Stop();
+        Thread.Sleep(400);
+        cableCapture.StopRecording();
+
+        var generated = provider.BurstTicks;
+        var usable = Math.Min(generated.Count, onsets.Count) - 5; // drop warmup bursts
+        if (usable < 10)
+        {
+            Console.Error.WriteLine($"insufficient samples: generated={generated.Count} detected={onsets.Count}");
+            return 2;
+        }
+
+        var latencies = new List<double>();
+        for (var i = 5; i < 5 + usable; i++)
+        {
+            latencies.Add((onsets[i] - generated[i]) * 1000.0 / Stopwatch.Frequency);
+        }
+
+        latencies.Sort();
+        double Percentile(int p) => latencies[Math.Min(latencies.Count - 1, latencies.Count * p / 100)];
+        Console.WriteLine($"capture_samples={totalSamples} max_abs={maxAbs:F3}");
+        Console.WriteLine($"render={renderDevice.FriendlyName} capture={cableDevice.FriendlyName}");
+        Console.WriteLine($"bursts generated={generated.Count} detected={onsets.Count} matched={latencies.Count} missed={generated.Count - onsets.Count}");
+        Console.WriteLine($"latency_ms p50={Percentile(50):F1} p95={Percentile(95):F1} p99={Percentile(99):F1} max={latencies[^1]:F1} min={latencies[0]:F1}");
         return 0;
     }
 
@@ -676,7 +775,7 @@ internal static class Program
         cableCapture.StartRecording();
         Thread.Sleep(500);
 
-        using var output = new WasapiOut(renderDevice, AudioClientShareMode.Exclusive, false, renderLatencyMs);
+        using var output = new WasapiOut(renderDevice, AudioClientShareMode.Exclusive, true, renderLatencyMs);
         output.Init(new SineWaveProvider(frequency, gain, new WaveFormat(44100, 16, 2)));
         output.Play();
         Thread.Sleep(2500);
@@ -873,4 +972,54 @@ internal sealed class BroadcastWaveProvider(IWaveProvider source) : IWaveProvide
     public double SinkDepthMs() => _sinks.Count == 0
         ? 0
         : _sinks.Average(s => s.BufferedBytes * 1000.0 / s.WaveFormat.AverageBytesPerSecond);
+}
+
+/// <summary>
+/// Periodic short marker bursts for the latency matrix: burstMs of sine every periodMs.
+/// Records a Stopwatch tick when the first sample of each burst is pulled by the renderer,
+/// pairing with capture-side onset ticks gives per-burst engine-to-virtual-input latency.
+/// </summary>
+internal sealed class BurstWaveProvider(int rate, int channels, int frequency, double amplitude, int burstMs, int periodMs) : IWaveProvider
+{
+    private readonly WaveFormat _format = new(rate, 16, channels);
+    private readonly int _burstFrames = rate * burstMs / 1000;
+    private readonly int _periodFrames = rate * periodMs / 1000;
+    private long _frame;
+    private double _phase;
+
+    public List<long> BurstTicks { get; } = [];
+
+    public WaveFormat WaveFormat => _format;
+
+    public int Read(byte[] buffer, int offset, int count)
+    {
+        var frameBytes = sizeof(short) * channels;
+        var frames = count / frameBytes;
+        for (var i = 0; i < frames; i++)
+        {
+            var positionInPeriod = (int)(_frame % _periodFrames);
+            if (positionInPeriod == 0)
+            {
+                BurstTicks.Add(Stopwatch.GetTimestamp());
+            }
+
+            var value = positionInPeriod < _burstFrames
+                ? Math.Sin(_phase) * amplitude * short.MaxValue
+                : 0;
+            for (var c = 0; c < channels; c++)
+            {
+                BitConverter.GetBytes((short)value).CopyTo(buffer, offset + ((i * channels) + c) * sizeof(short));
+            }
+
+            _phase += 2.0 * Math.PI * frequency / rate;
+            if (_phase > 2.0 * Math.PI)
+            {
+                _phase -= 2.0 * Math.PI;
+            }
+
+            _frame++;
+        }
+
+        return frames * frameBytes;
+    }
 }
