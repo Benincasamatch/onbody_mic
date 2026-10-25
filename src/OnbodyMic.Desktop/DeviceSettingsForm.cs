@@ -25,9 +25,12 @@ internal sealed class DeviceSettingsForm : Form
         _shell = shell;
         Text = "随声麦 · 设备与监听设置";
         Font = new Font("Microsoft YaHei UI", 9f);
+        AutoScaleMode = AutoScaleMode.Dpi;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
         StartPosition = FormStartPosition.CenterParent;
         ClientSize = new Size(580, 400);
         ShowInTaskbar = false;

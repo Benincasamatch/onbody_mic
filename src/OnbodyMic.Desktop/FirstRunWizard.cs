@@ -27,10 +27,13 @@ internal sealed class FirstRunWizard : Form
         _shell = shell;
         Text = "随声麦 · 首次引导";
         Font = new Font("Microsoft YaHei UI", 9f);
+        AutoScaleMode = AutoScaleMode.Dpi;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
-        StartPosition = FormStartPosition.CenterScreen;
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        StartPosition = FormStartPosition.CenterParent;
         ClientSize = new Size(560, 430);
         ShowInTaskbar = false;
 

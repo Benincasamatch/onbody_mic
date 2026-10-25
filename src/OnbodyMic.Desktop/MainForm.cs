@@ -53,7 +53,7 @@ internal sealed class MainForm : Form
     private readonly ListBox _hotkeyList = new() { Dock = DockStyle.Fill, IntegralHeight = false };
     private readonly StatusStrip _status = new();
     private readonly ToolStripStatusLabel _statusLabel = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
-    private readonly ToolStripStatusLabel _metricsLabel = new() { Spring = true, TextAlign = ContentAlignment.MiddleRight };
+    private readonly ToolStripStatusLabel _metricsLabel = new() { AutoSize = true, TextAlign = ContentAlignment.MiddleRight };
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 500 };
 
     private bool _refreshing;
@@ -64,7 +64,8 @@ internal sealed class MainForm : Form
         _onDirty = onDirty;
         Text = "随声麦 Onbody Mic";
         Font = new Font("Microsoft YaHei UI", 9f);
-        MinimumSize = new Size(760, 560);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        MinimumSize = new Size(860, 640);
         StartPosition = FormStartPosition.CenterScreen;
 
         BuildLayout();
@@ -208,7 +209,7 @@ internal sealed class MainForm : Form
         phase.Controls.AddRange([_phaseLabel, _emergencyButton]);
 
         var switches = new GroupBox { Text = "发送与监听", Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
-        var switchFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
+        var switchFlow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true };
         switchFlow.Controls.AddRange([
             _micCheck, _extrasCheck, _appCheck,
             Labeled("监听:", _monitorCombo), Labeled("监听音量:", _monitorVolume), _monitorVolumeLabel,

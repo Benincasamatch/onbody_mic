@@ -52,21 +52,37 @@ public sealed class MonitorRouterTests
     }
 
     [Fact]
-    public void FullEndpoint_reads_pushed_frames_and_applies_monitor_gain()
+    public void FullEndpoint_prerolls_then_reads_pushed_frames_with_monitor_gain()
     {
         var (router, _, _) = Build(new MonitorRouteState(true, MonitorMode.FullEndpoint), new RouteGains(1, 1, 1, 0.5f));
+        // pre-roll: the router stays silent until the prim threshold is met
+        var prim = 551; // Build: min(highWater/4, capacity/4)
+        router.PushFullEndpoint(new float[prim]);
+        var preroll = new float[2];
+        _ = router.Read(preroll);
+        Assert.All(preroll, v => Assert.Equal(0f, v)); // pre-roll stays silent
+
+        // keep the stream alive; once primed the monitor hears the frames
+        // through the monitor gain (adaptive interpolation, ±1%)
         router.PushFullEndpoint(new float[] { 0.4f, 0.8f });
-
+        float[]? heard = null;
         var output = new float[2];
-        var emitted = router.Read(output);
+        for (var i = 0; i < 400 && heard is null; i++)
+        {
+            router.PushFullEndpoint(new float[] { 0.4f, 0.8f, 0.4f, 0.8f });
+            var emitted = router.Read(output);
+            if (emitted > 0 && output.Take(emitted).Any(v => v > 0.01f))
+            {
+                heard = output[..emitted];
+            }
+        }
 
-        Assert.Equal(2, emitted);
-        Assert.Equal(0.2f, output[0], 5);
-        Assert.Equal(0.4f, output[1], 5);
+        Assert.NotNull(heard);
+        Assert.All(heard!, v => Assert.InRange(v, 0.1f, 0.45f));
     }
 
     [Fact]
-    public void FullEndpoint_ring_is_bounded_and_trims_drift()
+    public void FullEndpoint_ring_is_bounded_and_adapts_to_clock_drift()
     {
         var capacity = EngineFormat.TimeToFrames(TimeSpan.FromMilliseconds(300));
         var feed = new ClipFeed(new ClipPlayer(fadeFrames: 0), capacity, capacity / 2);
@@ -76,17 +92,34 @@ public sealed class MonitorRouterTests
             GainsProvider = () => RouteGains.Unity,
         };
 
-        // push beyond capacity -> oldest dropped
+        // push beyond capacity -> the backlog dumps to the target water level
         router.PushFullEndpoint(new float[capacity + 10]);
         var stats = router.Stats();
-        Assert.Equal(capacity, stats.QueuedFrames);
-        Assert.Equal(10, stats.FullEndpointDroppedFrames);
+        Assert.Equal(capacity / 4, stats.QueuedFrames);
+        Assert.True(stats.FullEndpointDroppedFrames >= 10);
 
-        // a read trims back toward the high-water mark before emitting
+        // steady state: production matches consumption, the ±1% adaptive ratio
+        // holds the water level — the backlog dump must not repeat
         var output = new float[32];
-        router.Read(output);
+        for (var i = 0; i < 500; i++)
+        {
+            router.PushFullEndpoint(new float[32]);
+            router.Read(output);
+        }
+
         stats = router.Stats();
-        Assert.True(stats.QueuedFrames <= capacity / 2 + 32);
+        var droppedAfterWarmup = stats.FullEndpointDroppedFrames;
+        for (var i = 0; i < 500; i++)
+        {
+            router.PushFullEndpoint(new float[32]);
+            router.Read(output);
+        }
+
+        stats = router.Stats();
+        Assert.Equal(droppedAfterWarmup, stats.FullEndpointDroppedFrames);
+        Assert.True(stats.QueuedFrames > 0, "ring ran dry under matched rates");
+        Assert.True(stats.FullEndpointStarvedFrames < 32 * 500 * 0.1,
+            $"starved too much under matched rates: {stats.FullEndpointStarvedFrames}");
     }
 
     [Fact]

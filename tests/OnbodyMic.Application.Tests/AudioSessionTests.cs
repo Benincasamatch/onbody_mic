@@ -328,7 +328,7 @@ public sealed class AudioSessionTests
         var env = SessionEnv.Create();
         env.Session.AttachOutput();
         Accept(env.Session.SetMonitor(true, MonitorMode.FullEndpoint));
-        env.MonitorCapture.Fake.Push?.Invoke(Filled(Period, 0.7f));
+        env.MonitorCapture.Fake.Push?.Invoke(Filled(Period * 5, 0.7f)); // past the pre-roll threshold
 
         var monitored = env.MonitorOutput.Fake.Pump(Period);
         Assert.All(monitored[..Period], value => Assert.Equal(0.7f, value, 4));

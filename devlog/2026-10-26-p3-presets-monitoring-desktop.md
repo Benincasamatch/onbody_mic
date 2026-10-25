@@ -90,6 +90,28 @@ src/OnbodyMic.Desktop/（新工程，WinForms） AppShell（组合根+设备校�
    c. "实际虚拟麦"需要预设里配置了线缆 Capture 端点（设置对话框"虚拟麦 Capture"一项不能是"不配置"）；若该下拉看不到 Steam AUX 项，说明端点被 Windows 禁用，用 `OnbodyMic.Cli.exe devices --all --ids` 查状态、`enable --id <端点ID>` 启用后重开程序。
    若以上均正确仍无声，回报具体操作序列，我来加取证工具。
 
+## 2026-10-26（补三）：P3.3 监听"炸"根因修复 + UI 缩放适配
+
+用户复测反馈：音效监听 ✅；**真麦+应用并发监听"非常炸"且与增益无关（0.01 仍炸）；KOOK 侧实际正常**——增益无关失真把嫌疑从电平收敛到数据流结构。
+
+取证过程（monprobe 新工具，`OnbodyMic.Cli.exe monprobe --capture-id <id> --rate-only`）：
+- AUX 端点 mixFormat 实测 **44100 Hz / 1ch / PCM16**——采样率错配假设否定；
+- 10ms 会话交付速率 **0.995× 实时**——P0B 驱动降速惩罚假设否定；
+- 发送链路 KOOK 实收正常（用户证）——引擎→线缆→采集全好。
+
+**根因**（读码+症状反推，高置信）：`MonitorRouter` 的 FullEndpoint 环**无预滚动、无速率适配**。SetMonitor 时采集泵（AUX 端点时钟）与监听输出泵（耳机端点时钟，独立设备独立时钟）几乎同时启动，环水位贴零抖动 → 持续饥饿/拼接 = 断续爆裂，与增益无关。P1 场景 E 当时记录 "q=441"（恰为 10ms=贴底）被误读为正常流动；音质从未人耳验证（P1 遗留#2）。P1.1 修过完全同构的 mic 通道双设备漂移（自适应速率 ±1%），监听环当时未装同款。
+
+**修复**（`MonitorRouter` 重写为绝对流坐标）：
+1. **预滚动**：FullEndpoint 激活后积满 prim（水位/4，约 37ms）才开始消费，从最新 target 窗口读起（听"现在"，不回放积压）；
+2. **自适应速率**：按水位误差 ±1% 线性插值拉伸/压缩，吸收 ppm 级时钟漂移（P1.1 同款机制）；
+3. **病态积压一次性排水**：环溢出时直接 splice 到 target 水位，不再逐帧滴漏；
+4. Stats 增 `FullEndpointStarvedFrames` 供指标观察。
+单测：预滚动静音→出声、稳态无 dump/无饥饿、溢出排水、预览/回送既有语义保持。**179 项全过**。
+
+**UI 文字显示不全**：三窗体 `AutoScaleMode.Dpi`（用户显示缩放 >100% 时布局未缩放）；向导/设置对话框 AutoSize+GrowAndShrink；主窗 MinimumSize 860×640；"发送与监听"组内层 FlowLayoutPanel 改 Top-dock+AutoSize（原 Fill 与父 AutoSize 冲突裁字）；状态栏指标 label 改 AutoSize。
+
+**构建注意**：用户正在运行的 OnbodyMic.Desktop（高权限实例）锁 bin 输出——修复版本先构建在 `.tools/tmp/build-p3/`（0 错误+selftest OK）；用户关闭旧实例后正常 `dotnet build` 即恢复 bin。
+
 ## 2026-10-26（补二）：P3.2 反听关闭、真麦并发"炸"取证支持
 
 用户复测：**音效监听正常**（P3 任务 3 的监听链路用户确认 ✅）。新反馈两项：

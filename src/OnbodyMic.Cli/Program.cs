@@ -31,6 +31,7 @@ internal static class Program
                 "latency" => LatencyProbe(args[1..]),
                 "panel" => PanelApp.Run(args[1..]),
                 "p2smoke" => P2Smoke.Run(args[1..]),
+                "monprobe" => MonitorProbe.Run(args[1..]),
                 _ => Usage(),
             };
         }

@@ -27,6 +27,11 @@ public sealed class WasapiEventCapture : IDisposable
 
     public event Action<Exception>? Faulted;
 
+    /// <summary>Actual negotiated format; the mix format's sample rate decides whether resampling is needed.</summary>
+    public CaptureFormatInfo Format { get; private set; }
+
+    public readonly record struct CaptureFormatInfo(int SampleRate, int Channels, bool FloatSamples);
+
     private WasapiEventCapture(
         IAudioClientCom client,
         IAudioCaptureClientCom capture,
@@ -54,16 +59,19 @@ public sealed class WasapiEventCapture : IDisposable
         {
             int channels;
             bool isFloat;
+            int sampleRate;
             if (useMixFormat)
             {
                 Marshal.ThrowExceptionForHR(client.GetMixFormat(out formatPtr));
                 channels = Marshal.ReadInt16(formatPtr, 2);
+                sampleRate = Marshal.ReadInt32(formatPtr, 4);
                 isFloat = Marshal.ReadInt16(formatPtr, 0) == 3; // WAVE_FORMAT_IEEE_FLOAT
             }
             else
             {
                 formatPtr = WindowsLowLevelAudio.CreateWaveFormatPcm16(44100, 1);
                 channels = 1;
+                sampleRate = 44100;
                 isFloat = false;
             }
 
@@ -76,12 +84,14 @@ public sealed class WasapiEventCapture : IDisposable
 
             var captureIid = WindowsLowLevelAudio.IidIAudioCaptureClient;
             Marshal.ThrowExceptionForHR(client.GetService(ref captureIid, out var service));
-            var capture = (IAudioCaptureClientCom)service;
+            var captureClient = (IAudioCaptureClientCom)service;
             var eventHandle = WindowsLowLevelAudio.CreateEventHandle();
             Marshal.ThrowExceptionForHR(client.SetEventHandle(eventHandle));
 
             var blockAlign = isFloat ? channels * 4 : channels * 2;
-            return new WasapiEventCapture(client, capture, eventHandle, channels, isFloat, (int)bufferFrames * blockAlign);
+            var instance = new WasapiEventCapture(client, captureClient, eventHandle, channels, isFloat, (int)bufferFrames * blockAlign);
+            instance.Format = new CaptureFormatInfo(sampleRate, channels, isFloat);
+            return instance;
         }
         finally
         {

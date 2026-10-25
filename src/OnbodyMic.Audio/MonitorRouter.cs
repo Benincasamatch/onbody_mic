@@ -14,12 +14,18 @@ public sealed class MonitorRouter
     private readonly float[] _ring;
     private readonly int _capacity;
     private readonly int _highWaterFrames;
-    private int _head;
-    private int _count;
+    private readonly int _primFrames;
+    private readonly int _targetFrames;
+
+    // absolute stream coordinates: ring slot = coordinate % capacity
+    private long _writePos;
+    private double _readPos;
+    private bool _primed;
 
     private long _fullEndpointPushed;
     private long _fullEndpointDropped;
     private long _framesEmitted;
+    private long _fullEndpointStarved;
 
     private const int PlayerChunkFrames = 2048;
     private readonly float[] _playerScratch = new float[PlayerChunkFrames];
@@ -31,6 +37,12 @@ public sealed class MonitorRouter
         _ring = new float[capacityFrames];
         _capacity = capacityFrames;
         _highWaterFrames = Math.Min(highWaterFrames, capacityFrames);
+        // pre-roll + adaptive consumption (P3.2): the capture endpoint and the
+        // monitor output device run on independent clocks with unsynchronized
+        // pump cadences — consuming from an empty ring produces continuous
+        // silence/splice bursts that no gain setting can hide
+        _primFrames = Math.Max(1, Math.Min(_highWaterFrames / 4, capacityFrames / 4));
+        _targetFrames = Math.Max(_primFrames, _highWaterFrames / 2);
     }
 
     public ClipFeed Feed { get; }
@@ -48,18 +60,25 @@ public sealed class MonitorRouter
         lock (_gate)
         {
             _fullEndpointPushed += frames.Length;
-            var overflow = _count + frames.Length - _capacity;
+            var overflow = _writePos + frames.Length - _readPos - _capacity;
             if (overflow > 0)
             {
-                _head = (_head + overflow) % _capacity;
-                _count -= overflow;
-                _fullEndpointDropped += overflow;
+                // pathological backlog: dump everything down to the target water
+                // level in one splice, then let the adaptive ratio hold it —
+                // better than a continuous drip of dropped frames
+                var drop = (long)Math.Ceiling(_writePos + frames.Length - _readPos - _targetFrames);
+                if (drop > 0)
+                {
+                    _readPos += drop;
+                    _fullEndpointDropped += drop;
+                    _primed = true;
+                }
             }
 
-            for (var i = 0; i < frames.Length; i++)
+            foreach (var frame in frames)
             {
-                _ring[(_head + _count) % _capacity] = frames[i];
-                _count++;
+                _ring[_writePos % _capacity] = frame;
+                _writePos++;
             }
         }
     }
@@ -90,23 +109,45 @@ public sealed class MonitorRouter
         {
             lock (_gate)
             {
-                // trim slow drift so the ring stays near the target watermark
-                var excess = _count - _highWaterFrames;
-                if (excess > 0)
+                if (!_primed)
                 {
-                    _head = (_head + excess) % _capacity;
-                    _count -= excess;
-                    _fullEndpointDropped += excess;
+                    if (_writePos - _readPos >= _primFrames)
+                    {
+                        // start from the newest window: pre-roll exists so the
+                        // listener hears "now", not the accumulated backlog
+                        _primed = true;
+                        _readPos = Math.Max(_readPos, _writePos - _targetFrames);
+                    }
+                    else
+                    {
+                        _fullEndpointStarved += frames;
+                    }
                 }
 
-                emitted = Math.Min(frames, _count);
-                for (var i = 0; i < emitted; i++)
+                if (_primed)
                 {
-                    destination[i] = _ring[(_head + i) % _capacity];
-                }
+                    // adaptive rate (P1.1 mechanism): hold the ring near the
+                    // target water level by stretching/squeezing ±1%; absorbs
+                    // the ppm-scale drift between capture and monitor output
+                    // clocks without queue growth or starvation
+                    var available = _writePos - _readPos;
+                    var error = available - _targetFrames;
+                    var ratio = 1.0 + Math.Clamp(error / _targetFrames * 0.01, -0.01, 0.01);
+                    while (emitted < frames && _writePos - _readPos >= 1)
+                    {
+                        var index0 = (int)(_readPos % _capacity);
+                        var frac = _readPos - Math.Floor(_readPos);
+                        var index1 = (index0 + 1) % _capacity;
+                        destination[emitted] = _ring[index0] + ((_ring[index1] - _ring[index0]) * (float)frac);
+                        _readPos += ratio;
+                        emitted++;
+                    }
 
-                _head = (_head + emitted) % _capacity;
-                _count -= emitted;
+                    if (emitted < frames)
+                    {
+                        _fullEndpointStarved += frames - emitted;
+                    }
+                }
             }
         }
 
@@ -148,19 +189,22 @@ public sealed class MonitorRouter
     {
         lock (_gate)
         {
-            _fullEndpointDropped += _count;
-            _head = 0;
-            _count = 0;
+            _writePos = 0;
+            _readPos = 0;
+            _primed = false;
         }
-
-        Feed.ClearTap();
     }
 
     public MonitorRouterStats Stats()
     {
         lock (_gate)
         {
-            return new MonitorRouterStats(_fullEndpointPushed, _fullEndpointDropped, _count, _framesEmitted);
+            return new MonitorRouterStats(
+                _fullEndpointPushed,
+                _fullEndpointDropped,
+                _primed ? (int)(_writePos - _readPos) : 0,
+                _framesEmitted,
+                _fullEndpointStarved);
         }
     }
 }
@@ -169,4 +213,5 @@ public readonly record struct MonitorRouterStats(
     long FullEndpointPushedFrames,
     long FullEndpointDroppedFrames,
     int QueuedFrames,
-    long FramesEmitted);
+    long FramesEmitted,
+    long FullEndpointStarvedFrames = 0);
