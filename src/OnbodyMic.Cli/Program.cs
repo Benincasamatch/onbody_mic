@@ -2,8 +2,10 @@ namespace OnbodyMic.Cli;
 
 using System.Text;
 using System.Diagnostics;
+using System.Linq;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
 using OnbodyMic.Platform.Windows;
 
 internal static class Program
@@ -15,11 +17,15 @@ internal static class Program
             Console.OutputEncoding = Encoding.UTF8;
             return args.Length == 0 ? Usage() : args[0] switch
             {
-                "devices" => ListDevices(args.Length > 1 && args[1] == "--all"),
+                "devices" => ListDevices(args.Skip(1).Contains("--all"), args.Skip(1).Contains("--ids")),
+                "enable" => SetEnabled(args[1..], true),
+                "disable" => SetEnabled(args[1..], false),
+                "setformat" => SetFormat(args[1..]),
                 "tone" => PlayTone(args[1..]),
                 "record" => Record(args[1..]),
                 "analyze" => Analyze(args[1..]),
                 "loop" => Loop(args[1..]),
+                "mixloop" => MixLoop(args[1..]),
                 _ => Usage(),
             };
         }
@@ -36,16 +42,27 @@ internal static class Program
             onbody <command>
 
             commands:
-              devices [--all]                         list audio endpoints
-              tone --index <n> [--seconds s] [--freq hz] [--gain g]
+              devices [--all] [--ids]                list audio endpoints
+              tone (--index <n> | --id <id>) [--seconds s] [--freq hz] [--gain g]
                                                       play a test sine to a render endpoint
-              record --index <n> --seconds s --out <file.wav>
+              record (--index <n> | --id <id>) --seconds s --out <file.wav>
                                                       capture an endpoint to wav
+              analyze --file <f.wav> [--freq hz]     goertzel tone detection on a wav
+              loop (--render <i> | --render-id <id>) (--capture <i> | --capture-id <id>)
+                    --out <file.wav> [--seconds s] [--freq hz] [--gain g]
+                                                      same-process play+record loopback probe
+              mixloop (--mic .. | --mic-id ..) (--render .. | --render-id ..) (--capture .. | --capture-id ..)
+                    --out <file.wav> [--freq hz] [--gain g] [--micgain g] [--rate hz] [--seconds s]
+                                                      mic+sfx mixed into the cable, verified at the capture side
+              analyze --file <f.wav> [--freq hz] [--peaks] [--onset <thr>]
+              enable --id <id> | disable --id <id>    toggle a disabled MMDevice endpoint (IPolicyConfig)
+              setformat --id <id> --rate <hz> [--channels c]
+                                                      set endpoint shared-mode format to float32 (IPolicyConfig)
             """);
         return 0;
     }
 
-    private static int ListDevices(bool activeOnly)
+    private static int ListDevices(bool activeOnly, bool showIds)
     {
         var devices = WindowsAudioDevices.List(activeOnly);
         Console.WriteLine("idx flow     state   name");
@@ -53,17 +70,50 @@ internal static class Program
         {
             var device = devices[i];
             Console.WriteLine($"{i,3} {device.DataFlow,-8} {device.State,-7} {device.FriendlyName}");
+            if (showIds)
+            {
+                Console.WriteLine($"      id={device.Id}");
+            }
         }
 
         return 0;
     }
 
+    private static int SetEnabled(string[] rest, bool enabled)
+    {
+        var options = ParseOptions(rest);
+        if (!options.TryGetValue("id", out var id))
+        {
+            Console.Error.WriteLine("enable/disable requires --id <endpointId>");
+            return 1;
+        }
+
+        WindowsEndpointControl.SetEnabled(id, enabled);
+        Console.WriteLine($"{(enabled ? "enabled" : "disabled")}: {id}");
+        return 0;
+    }
+
+    private static int SetFormat(string[] rest)
+    {
+        var options = ParseOptions(rest);
+        if (!options.TryGetValue("id", out var id) || !options.ContainsKey("rate"))
+        {
+            Console.Error.WriteLine("setformat requires --id <endpointId> --rate <hz> [--channels c]");
+            return 1;
+        }
+
+        var rate = (int)ParseDouble(options, "rate", 0);
+        var channels = (int)ParseDouble(options, "channels", 1);
+        WindowsEndpointControl.SetDeviceFormat(id, rate, channels);
+        Console.WriteLine($"set format: {id} -> {rate} Hz, {channels} ch, float32");
+        return 0;
+    }
     private static int PlayTone(string[] rest)
     {
         var options = ParseOptions(rest);
-        if (!options.TryGetValue("index", out var indexText) || !int.TryParse(indexText, out var index))
+        if (!options.ContainsKey("id") && !options.ContainsKey("index"))
         {
-            Console.Error.WriteLine("tone requires --index <n> (render endpoint index from `devices`)");
+            Console.Error.WriteLine("tone requires --index <n> or --id <endpointId> (render endpoint from `devices`)");
             return 1;
         }
 
@@ -76,10 +126,10 @@ internal static class Program
             return 1;
         }
 
-        using var device = WindowsAudioDevices.FindByIndex(index, capture: false);
+        using var device = ResolveDevice(options, "index", "id", capture: false);
         if (device is null)
         {
-            Console.Error.WriteLine($"no active render endpoint at index {index}");
+            Console.Error.WriteLine("render endpoint not found");
             return 1;
         }
 
@@ -96,9 +146,9 @@ internal static class Program
     private static int Record(string[] rest)
     {
         var options = ParseOptions(rest);
-        if (!options.TryGetValue("index", out var indexText) || !int.TryParse(indexText, out var index))
+        if (!options.ContainsKey("id") && !options.ContainsKey("index"))
         {
-            Console.Error.WriteLine("record requires --index <n> (capture endpoint index from `devices`)");
+            Console.Error.WriteLine("record requires --index <n> or --id <endpointId> (capture endpoint from `devices`)");
             return 1;
         }
 
@@ -115,10 +165,10 @@ internal static class Program
             return 1;
         }
 
-        using var device = WindowsAudioDevices.FindByIndex(index, capture: true);
+        using var device = ResolveDevice(options, "index", "id", capture: true);
         if (device is null)
         {
-            Console.Error.WriteLine($"no active capture endpoint at index {index}");
+            Console.Error.WriteLine("capture endpoint not found");
             return 1;
         }
 
@@ -153,6 +203,25 @@ internal static class Program
 
         return result;
     }
+    private static MMDevice? ResolveDevice(Dictionary<string, string> options, string indexKey, string idKey, bool capture)
+    {
+        if (options.TryGetValue(idKey, out var id))
+        {
+            try
+            {
+                return WindowsAudioDevices.OpenById(id);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"endpoint id lookup failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        return int.TryParse(options.GetValueOrDefault(indexKey), out var index)
+            ? WindowsAudioDevices.FindByIndex(index, capture)
+            : null;
+    }
 
     private static double ParseDouble(Dictionary<string, string> options, string key, double fallback) =>
         double.TryParse(options.GetValueOrDefault(key), out var value) ? value : fallback;
@@ -160,28 +229,33 @@ internal static class Program
     private static int Loop(string[] rest)
     {
         var options = ParseOptions(rest);
-        if (!options.TryGetValue("render", out var renderText) || !int.TryParse(renderText, out var renderIndex) ||
-            !options.TryGetValue("capture", out var captureText) || !int.TryParse(captureText, out var captureIndex) ||
-            !options.TryGetValue("out", out var outFile))
+        var hasOut = options.TryGetValue("out", out var outFile);
+        var hasRender = options.ContainsKey("render") || options.ContainsKey("render-id");
+        var hasCapture = options.ContainsKey("capture") || options.ContainsKey("capture-id");
+        if (!hasOut || !hasRender || !hasCapture)
         {
-            Console.Error.WriteLine("loop requires --render <i> --capture <i> --out <file.wav>");
+            Console.Error.WriteLine("loop requires (--render <i> | --render-id <id>) (--capture <i> | --capture-id <id>) --out <file.wav>");
             return 1;
         }
 
         var seconds = ParseDouble(options, "seconds", 4);
         var frequency = ParseDouble(options, "freq", 440);
         var gain = ParseDouble(options, "gain", 0.35);
+        var exclusive = "exclusive".Equals(options.GetValueOrDefault("share", "shared"), StringComparison.OrdinalIgnoreCase);
+        var rate = (int)ParseDouble(options, "rate", 0);
+        var channels = (int)ParseDouble(options, "channels", 2);
+        var pcm16 = (int)ParseDouble(options, "bits", 32) == 16;
         if (seconds <= 2 || frequency <= 0 || gain is < 0 or > 1)
         {
             Console.Error.WriteLine("seconds must be > 2; freq must be positive; gain within [0,1]");
             return 1;
         }
 
-        using var renderDevice = WindowsAudioDevices.FindByIndex(renderIndex, capture: false);
-        using var captureDevice = WindowsAudioDevices.FindByIndex(captureIndex, capture: true);
+        using var renderDevice = ResolveDevice(options, "render", "render-id", capture: false);
+        using var captureDevice = ResolveDevice(options, "capture", "capture-id", capture: true);
         if (renderDevice is null || captureDevice is null)
         {
-            Console.Error.WriteLine("render or capture index not found");
+            Console.Error.WriteLine("render or capture endpoint not found");
             return 1;
         }
 
@@ -201,8 +275,11 @@ internal static class Program
         Thread.Sleep(500);
         var toneStartedAt = Stopwatch.GetTimestamp();
 
-        using var output = new WasapiOut(renderDevice, AudioClientShareMode.Shared, false, 50);
-        var sine = new SineWaveProvider(frequency, gain);
+        var sineFormat = rate > 0
+            ? (pcm16 ? new WaveFormat(rate, 16, channels) : WaveFormat.CreateIeeeFloatWaveFormat(rate, channels))
+            : null;
+        using var output = new WasapiOut(renderDevice, exclusive ? AudioClientShareMode.Exclusive : AudioClientShareMode.Shared, false, 50);
+        var sine = new SineWaveProvider(frequency, gain, sineFormat);
         output.Init(sine);
         output.Play();
         Thread.Sleep(TimeSpan.FromSeconds(seconds - 1));
@@ -214,8 +291,87 @@ internal static class Program
 
         Console.WriteLine($"render={renderDevice.FriendlyName}");
         Console.WriteLine($"capture={captureDevice.FriendlyName}");
+        Console.WriteLine($"capture_format={capture.WaveFormat}");
+        Console.WriteLine($"sine_format={sine.WaveFormat} share={(exclusive ? "exclusive" : "shared")}");
         Console.WriteLine($"tone_started_at_ms={(toneStartedAt - startedAt) * 1000.0 / Stopwatch.Frequency:F1}");
         _ = firstSampleTicks; // latency marking is P0 follow-up; keep the CLI deterministic for now.
+        return 0;
+    }
+
+    private static int MixLoop(string[] rest)
+    {
+        var options = ParseOptions(rest);
+        var hasMic = options.ContainsKey("mic") || options.ContainsKey("mic-id");
+        var hasRender = options.ContainsKey("render") || options.ContainsKey("render-id");
+        var hasCable = options.ContainsKey("capture") || options.ContainsKey("capture-id");
+        if (!hasMic || !hasRender || !hasCable || !options.TryGetValue("out", out var outFile))
+        {
+            Console.Error.WriteLine("mixloop requires (--mic <i> | --mic-id <id>) (--render <i> | --render-id <id>) (--capture <i> | --capture-id <id>) --out <file.wav>");
+            return 1;
+        }
+
+        var seconds = ParseDouble(options, "seconds", 6);
+        var frequency = ParseDouble(options, "freq", 440);
+        var gain = ParseDouble(options, "gain", 0.3);
+        var micGain = ParseDouble(options, "micgain", 1.0);
+        var rate = (int)ParseDouble(options, "rate", 44100);
+        if (seconds <= 2 || frequency <= 0 || gain is < 0 or > 1 || micGain < 0)
+        {
+            Console.Error.WriteLine("seconds>2, freq>0, gain within [0,1], micgain>=0");
+            return 1;
+        }
+
+        using var micDevice = ResolveDevice(options, "mic", "mic-id", capture: true);
+        using var renderDevice = ResolveDevice(options, "render", "render-id", capture: false);
+        using var cableDevice = ResolveDevice(options, "capture", "capture-id", capture: true);
+        if (micDevice is null || renderDevice is null || cableDevice is null)
+        {
+            Console.Error.WriteLine("mic, render or cable capture endpoint not found");
+            return 1;
+        }
+
+        var startedAt = Stopwatch.GetTimestamp();
+
+        // verification capture: exactly what KOOK would hear from the cable
+        using var cableCapture = new WasapiCapture(cableDevice);
+        using var writer = new WaveFileWriter(outFile, cableCapture.WaveFormat);
+        cableCapture.DataAvailable += (_, e) => writer.Write(e.Buffer, 0, e.BytesRecorded);
+        cableCapture.StartRecording();
+
+        // live mic buffered, then resampled into the cable's exclusive format
+        using var micCapture = new WasapiCapture(micDevice);
+        var micBuffer = new BufferedWaveProvider(micCapture.WaveFormat)
+        {
+            DiscardOnBufferOverflow = true,
+            BufferDuration = TimeSpan.FromSeconds(2),
+        };
+        micCapture.DataAvailable += (_, e) => micBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
+        micCapture.StartRecording();
+        Thread.Sleep(300);
+
+        var cableFloat = WaveFormat.CreateIeeeFloatWaveFormat(rate, 2);
+        var micResampled = new MediaFoundationResampler(micBuffer, cableFloat).ToSampleProvider();
+        var micScaled = new VolumeSampleProvider(micResampled) { Volume = (float)micGain };
+        var sine = new SineWaveProvider(frequency, gain, cableFloat).ToSampleProvider();
+        var mixer = new MixingSampleProvider(cableFloat) { ReadFully = true };
+        mixer.AddMixerInput(micScaled);
+        mixer.AddMixerInput(sine);
+
+        using var output = new WasapiOut(renderDevice, AudioClientShareMode.Exclusive, false, 50);
+        output.Init(new SampleToWaveProvider16(mixer));
+        output.Play();
+        Console.WriteLine($"mixing mic + {frequency:N0} Hz -> {renderDevice.FriendlyName} (exclusive {rate} Hz)");
+        Console.WriteLine($"verifying from cable capture: {cableDevice.FriendlyName}");
+        Console.WriteLine("speak into the mic during this run ...");
+        Thread.Sleep(TimeSpan.FromSeconds(seconds - 1));
+        output.Stop();
+        micCapture.StopRecording();
+        Thread.Sleep(300);
+        cableCapture.StopRecording();
+        Thread.Sleep(300);
+        writer.Flush();
+
+        Console.WriteLine($"elapsed_ms={(Stopwatch.GetTimestamp() - startedAt) * 1000.0 / Stopwatch.Frequency:F1}");
         return 0;
     }
 
@@ -284,7 +440,29 @@ internal static class Program
         Console.WriteLine($"rms={rms:F6}");
         Console.WriteLine($"tone_power={tonePower:F2}");
         Console.WriteLine($"noise_power={noisePower:F2}");
+        if (options.ContainsKey("onset"))
+        {
+            var threshold = ParseDouble(options, "onset", 0.02);
+            var onset = samples.FindIndex(s => Math.Abs(s) > threshold);
+            Console.WriteLine(onset < 0 ? "onset=none" : $"onset_ms={onset * 1000.0 / sampleRate:F0}");
+        }
         Console.WriteLine($"tone_noise_ratio={ratio:F2}");
+
+        if (options.ContainsKey("peaks"))
+        {
+            Console.WriteLine("top spectral peaks (goertzel scan 40..8000 Hz, step 2 Hz):");
+            var energies = new List<(double Hz, double Power)>();
+            for (var f = 40.0; f <= 8000.0; f += 2.0)
+            {
+                energies.Add((f, GoertzelPower(samples, sampleRate, f)));
+            }
+
+            foreach (var (hz, power) in energies.OrderByDescending(x => x.Power).Take(8))
+            {
+                Console.WriteLine($"  {hz,7:F0} Hz  power={power:F2}");
+            }
+        }
+
         Console.WriteLine(ratio > 20 && rms > 0.0005 ? "result=tone-detected" : "result=no-tone");
         return 0;
     }
@@ -309,21 +487,34 @@ internal static class Program
         buffer[offset] | (buffer[offset + 1] << 8) | (buffer[offset + 2] << 16);
 }
 
-internal sealed class SineWaveProvider(double frequency, double amplitude) : IWaveProvider
+internal sealed class SineWaveProvider(double frequency, double amplitude, WaveFormat? format = null) : IWaveProvider
 {
-    private readonly WaveFormat _format = WaveFormat.CreateIeeeFloatWaveFormat(48000, 2);
+    private readonly WaveFormat _format = format ?? WaveFormat.CreateIeeeFloatWaveFormat(48000, 2);
     private double _phase;
 
     public WaveFormat WaveFormat => _format;
 
     public int Read(byte[] buffer, int offset, int count)
     {
-        var samples = count / sizeof(float);
-        for (var i = 0; i < samples; i += 2)
+        var bytesPerSample = _format.BitsPerSample / 8;
+        var frameBytes = bytesPerSample * _format.Channels;
+        var frames = count / frameBytes;
+        for (var i = 0; i < frames; i++)
         {
-            var value = BitConverter.GetBytes((float)(Math.Sin(_phase) * amplitude));
-            value.CopyTo(buffer, offset + (i + 0) * sizeof(float));
-            value.CopyTo(buffer, offset + (i + 1) * sizeof(float));
+            var value = Math.Sin(_phase) * amplitude;
+            for (var c = 0; c < _format.Channels; c++)
+            {
+                var at = offset + (i * frameBytes) + (c * bytesPerSample);
+                if (_format.Encoding == WaveFormatEncoding.IeeeFloat)
+                {
+                    BitConverter.GetBytes((float)value).CopyTo(buffer, at);
+                }
+                else
+                {
+                    BitConverter.GetBytes((short)Math.Clamp(value * short.MaxValue, short.MinValue, short.MaxValue)).CopyTo(buffer, at);
+                }
+            }
+
             _phase += 2.0 * Math.PI * frequency / _format.SampleRate;
             if (_phase > 2.0 * Math.PI)
             {
@@ -331,6 +522,6 @@ internal sealed class SineWaveProvider(double frequency, double amplitude) : IWa
             }
         }
 
-        return samples * sizeof(float);
+        return frames * frameBytes;
     }
 }
