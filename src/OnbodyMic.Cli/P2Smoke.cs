@@ -133,9 +133,10 @@ internal static class P2Smoke
             return 1;
         }
 
-        // 3. hotkey backend + bindings, trigger ticks recorded for latency math
+        // 3. hotkey backend. The injection probe runs at the service level
+        // BEFORE the dispatcher exists, so probing has zero dispatch side
+        // effects and cannot disturb the scenario bindings registered below.
         using var hotkeys = new WindowsHotkeyService();
-        using var dispatcher = new HotkeyDispatcher(session, hotkeys, Resolve);
         var triggerLog = new List<(HotkeyAction Action, long Tick)>();
         hotkeys.Triggered += trigger =>
         {
@@ -144,6 +145,18 @@ internal static class P2Smoke
                 triggerLog.Add((trigger.Binding.Action, trigger.TimestampTick));
             }
         };
+
+        // Injection capability probe: SendInput must reach the system input
+        // stream for keys mode. The agent harness blocks it entirely (proven
+        // with a WH_KEYBOARD_LL hook); some machines own individual gestures
+        // (graphics drivers commonly take Ctrl+Alt+F-keys), so every
+        // candidate reports its own outcome instead of failing silently.
+        var keysMode = ProbeInjection(hotkeys, triggerLog);
+        Console.WriteLine(keysMode
+            ? "drive: SendInput 注入有效（keys 模式，测热键全链路）"
+            : "drive: 注入不可达（direct 模式：直驱会话命令=分派器同一路径；热键触发用面板+物理按键验证）");
+
+        using var dispatcher = new HotkeyDispatcher(session, hotkeys, Resolve);
 
         foreach (var (name, gestureText, action, target) in new[]
         {
@@ -161,16 +174,6 @@ internal static class P2Smoke
             }
         }
 
-        // Injection capability probe: the agent harness runs on a desktop
-        // where SendInput never enters the system input stream (proven with a
-        // WH_KEYBOARD_LL hook that saw zero injected events). If injection
-        // cannot reach the hotkey matcher, drive the same commands the
-        // dispatcher would forward and mark the hotkey-latency figure as an
-        // engine-path number; interactive-session runs use real keys.
-        var keysMode = ProbeInjection(dispatcher, hotkeys, triggerLog);
-        Console.WriteLine(keysMode
-            ? "drive: SendInput 注入有效（keys 模式，测热键全链路）"
-            : "drive: 注入不可达（direct 模式：直驱会话命令=分派器同一路径；热键触发待用户交互会话验证）");
 
         void Drive(string action)
         {
@@ -458,35 +461,51 @@ internal static class P2Smoke
 
         return failures.Count == 0 ? 0 : 1;
     }
-    private static bool ProbeInjection(HotkeyDispatcher dispatcher, WindowsHotkeyService hotkeys, List<(HotkeyAction Action, long Tick)> log)
+    /// <summary>
+    /// Tries several probe gestures at the service level; reports each
+    /// outcome (bind conflict vs. silent) so a taken gesture is never
+    /// mistaken for blocked injection.
+    /// </summary>
+    private static bool ProbeInjection(WindowsHotkeyService hotkeys, List<(HotkeyAction Action, long Tick)> log)
     {
-        const string probeGesture = "Ctrl+Alt+F6";
-        if (!dispatcher.Bind(new HotkeyBinding(HotkeyAction.StopClip, null, ParseGesture(probeGesture))).Accepted)
+        var report = new List<string>();
+        foreach (var gestureText in (string[])["Ctrl+Alt+U", "Ctrl+Alt+P", "Ctrl+Alt+Num9", "Ctrl+Alt+F6"])
         {
-            return false;
-        }
+            var bind = hotkeys.Register(new HotkeyBinding(HotkeyAction.ToggleMonitor, null, ParseGesture(gestureText)));
+            if (!bind.Accepted)
+            {
+                report.Add($"{gestureText}:被占用({bind.Rejection})");
+                continue;
+            }
 
-        int before;
-        lock (log)
-        {
-            before = log.Count;
-        }
-
-        PressCombo(probeGesture);
-        for (var i = 0; i < 8; i++)
-        {
-            Thread.Sleep(100);
+            int before;
             lock (log)
             {
-                if (log.Count > before && log[log.Count - 1].Action == HotkeyAction.StopClip)
+                before = log.Count;
+            }
+
+            PressCombo(gestureText);
+            var fired = false;
+            for (var i = 0; i < 8 && !fired; i++)
+            {
+                Thread.Sleep(100);
+                lock (log)
                 {
-                    _ = dispatcher.Unbind(HotkeyAction.StopClip, null);
-                    return true;
+                    fired = log.Count > before && log[log.Count - 1].Action == HotkeyAction.ToggleMonitor;
                 }
             }
+
+            _ = hotkeys.Unregister(HotkeyAction.ToggleMonitor, null);
+            if (fired)
+            {
+                Console.WriteLine($"injection probe: {gestureText} 触发有效（其余候选: {(report.Count == 0 ? "无" : string.Join("; ", report))}）");
+                return true;
+            }
+
+            report.Add($"{gestureText}:注入无响应");
         }
 
-        _ = dispatcher.Unbind(HotkeyAction.StopClip, null);
+        Console.WriteLine($"injection probe: 全部候选未触发（{string.Join("; ", report)}）");
         return false;
     }
     private static List<long> TicksOf(List<(HotkeyAction Action, long Tick)> log, HotkeyAction action, long skipBefore = long.MinValue, long until = long.MaxValue)
