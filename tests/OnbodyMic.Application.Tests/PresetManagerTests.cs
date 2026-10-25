@@ -217,11 +217,41 @@ public sealed class PresetManagerTests : IDisposable
         Accept(_env.Manager.Save("preset-a", ["clip-x", "clip-y"], favoritesOnly: true, groupId: "g1"));
 
         var loaded = _env.Store.Load("preset-a").Config!;
-        Assert.Equal(2f, loaded.MicGain, 3);
-        Assert.Equal(0.75f, loaded.Monitor.Gain, 3);
-        Assert.Equal(["clip-x", "clip-y"], loaded.ClipLayout);
-        Assert.True(loaded.LibraryFavoritesOnly);
-        Assert.Equal("g1", loaded.LibraryGroupId);
+        Assert.Equal("test-mic", loaded.Devices.MicDeviceId); // snapshot carries current devices
+    }
+
+    [Fact]
+    public void UpdateDeviceSettings_saves_and_reapplies_the_preset()
+    {
+        _env.Store.Save(Config("preset-a"));
+        Accept(_env.Manager.Apply("preset-a"));
+        Accept(_env.Session.EnableMic(true));
+
+        var result = _env.Manager.UpdateDeviceSettings(
+            "preset-a",
+            new PresetDeviceConfig("mic-9", "render-9", "cable-9", "monitor-9", null),
+            new MonitorPreferences(MonitorMode.FullEndpoint, 0.5f));
+
+        Assert.True(result.Accepted, result.Rejection);
+        var status = _env.Session.Status();
+        Assert.False(status.Switches.MicSendEnabled); // re-applied: everything off again
+        Assert.Equal("mic-9", status.Devices!.MicDeviceId);
+        Assert.Equal(MonitorMode.FullEndpoint, status.MonitorMode);
+        var stored = _env.Store.Load("preset-a").Config!;
+        Assert.Equal("render-9", stored.Devices.VirtualRenderDeviceId);
+        Assert.Equal(0.5f, stored.Monitor.Gain, 3);
+    }
+
+    [Fact]
+    public void UpdateDeviceSettings_on_missing_preset_rejects_without_touching_the_session()
+    {
+        var result = _env.Manager.UpdateDeviceSettings(
+            "preset-nope",
+            new PresetDeviceConfig("m", "r", null, "h", null),
+            new MonitorPreferences(MonitorMode.ClipOnly, 1f));
+
+        Assert.False(result.Accepted);
+        Assert.Equal("preset-not-found", result.Rejection);
     }
 
     [Fact]

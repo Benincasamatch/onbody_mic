@@ -71,6 +71,34 @@ public sealed class PresetManager
         return result;
     }
 
+    /// <summary>
+    /// Settings-page save: writes new endpoints and monitor preference into
+    /// the stored preset, then re-applies it through the same safe switch
+    /// transaction (everything turns off; enabling stays explicit).
+    /// </summary>
+    public PresetApplyResult UpdateDeviceSettings(
+        string presetId,
+        PresetDeviceConfig devices,
+        MonitorPreferences monitor)
+    {
+        var load = _store.Load(presetId);
+        if (load.Status != PresetLoadStatus.Loaded)
+        {
+            return PresetApplyResult.Reject(load.Status == PresetLoadStatus.NotFound
+                ? "preset-not-found"
+                : $"preset-corrupt:{load.Reason}");
+        }
+
+        var config = load.Config! with { Devices = devices, Monitor = monitor };
+        var saved = _store.Save(config);
+        if (!saved.Accepted)
+        {
+            return PresetApplyResult.Reject($"save-failed:{saved.Rejection}");
+        }
+
+        Notice($"已更新预设 {presetId} 的设备与监听偏好（正在重新应用，全部发送/监听将关闭）");
+        return Apply(presetId);
+    }
     public CommandResult Duplicate(string presetId, string newName)
     {
         var load = _store.Load(presetId);

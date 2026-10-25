@@ -20,6 +20,7 @@ internal sealed class TrayContext : ApplicationContext
     private readonly ToolStripMenuItem _extrasItem = new("附加音频（应用+音效）");
     private readonly ToolStripMenuItem _monitorItem = new("本地监听");
     private readonly ToolStripMenuItem _muteItem = new("紧急全静音");
+    private readonly ToolStripMenuItem _settingsItem = new("设备与监听设置...");
     private readonly ToolStripMenuItem _exitItem = new("退出");
 
     public TrayContext(AppShell shell, bool showFirstRun)
@@ -31,6 +32,7 @@ internal sealed class TrayContext : ApplicationContext
 
         var menu = new ContextMenuStrip();
         menu.Items.Add(_openItem);
+        menu.Items.Add(_settingsItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_micItem);
         menu.Items.Add(_extrasItem);
@@ -50,6 +52,15 @@ internal sealed class TrayContext : ApplicationContext
         _tray.DoubleClick += (_, _) => _main.ShowFromTray();
 
         _openItem.Click += (_, _) => _main.ShowFromTray();
+        _settingsItem.Click += (_, _) =>
+        {
+            _main.ShowFromTray();
+            using var settings = new DeviceSettingsForm(_shell);
+            if (settings.ShowDialog(_main) == DialogResult.OK)
+            {
+                _main.RefreshStatus();
+            }
+        };
         _micItem.Click += (_, _) => Toggle(() => _shell.Session.EnableMic(!_shell.Session.Status().Switches.MicSendEnabled), "真麦发送");
         _extrasItem.Click += (_, _) => Toggle(() => _shell.Session.EnableExtras(!_shell.Session.Status().Switches.ExtrasSendEnabled), "附加音频");
         _monitorItem.Click += (_, _) => Toggle(() => _shell.Session.SetMonitor(

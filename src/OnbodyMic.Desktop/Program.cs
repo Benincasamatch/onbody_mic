@@ -59,6 +59,7 @@ internal static class Program
             main.RefreshStatus();
             using var tray = new NotifyIcon { Icon = System.Drawing.SystemIcons.Application, Visible = false };
             using var wizard = new FirstRunWizard(shell);
+            using var settings = new DeviceSettingsForm(shell);
 
             Console.WriteLine($"selftest: restored={restored} phase={status.Phase} presets={presets.Count}");
             Console.WriteLine($"selftest: switches={status.Switches} devices={(status.Devices is null ? "none" : "configured")}");

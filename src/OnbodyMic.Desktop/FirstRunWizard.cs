@@ -78,15 +78,23 @@ internal sealed class FirstRunWizard : Form
     private static void Fill(ComboBox combo, bool capture, string? preferred, string? optional = null)
     {
         combo.Items.Clear();
+        var defaultId = WindowsAudioDevices.DefaultDeviceId(capture);
         var endpoints = WindowsAudioDevices.List(activeOnly: true)
             .Where(d => d.DataFlow == (capture ? "Capture" : "Render"))
             .ToList();
         var preferredIndex = -1;
         foreach (var endpoint in endpoints)
         {
-            combo.Items.Add(new EndpointRow(endpoint));
+            var isDefault = endpoint.Id == defaultId;
+            combo.Items.Add(new EndpointRow(endpoint, isDefault));
             if (preferred is not null && endpoint.FriendlyName.Contains(preferred, StringComparison.OrdinalIgnoreCase)
                 && preferredIndex < 0)
+            {
+                preferredIndex = combo.Items.Count - 1;
+            }
+
+            // without a preferred candidate, the system default is the sane initial pick
+            if (preferred is null && isDefault)
             {
                 preferredIndex = combo.Items.Count - 1;
             }
@@ -146,8 +154,10 @@ internal sealed class FirstRunWizard : Form
         Close();
     }
 
-    private sealed record EndpointRow(AudioEndpointInfo Endpoint)
+    private sealed record EndpointRow(AudioEndpointInfo Endpoint, bool IsDefault)
     {
-        public override string ToString() => Endpoint.FriendlyName;
+        public override string ToString() => IsDefault
+            ? $"{Endpoint.FriendlyName}（当前系统默认）"
+            : Endpoint.FriendlyName;
     }
 }

@@ -27,6 +27,7 @@ internal sealed class MainForm : Form
     private readonly Button _renameButton = new() { Text = "重命名" };
     private readonly Button _deleteButton = new() { Text = "删除" };
     private readonly Button _saveButton = new() { Text = "保存" };
+    private readonly Button _settingsButton = new() { Text = "设备与监听设置..." };
     private readonly Label _dirtyLabel = new() { Text = "", ForeColor = Color.Firebrick, AutoSize = true };
     private readonly Label _phaseLabel = new() { Text = "...", Font = new Font("Microsoft YaHei UI", 12f, FontStyle.Bold), AutoSize = true };
     private readonly Button _emergencyButton = new() { Text = "紧急全静音", BackColor = Color.Firebrick, ForeColor = Color.White };
@@ -77,6 +78,7 @@ internal sealed class MainForm : Form
         _renameButton.Click += (_, _) => RenamePreset();
         _deleteButton.Click += (_, _) => DeletePreset();
         _saveButton.Click += (_, _) => SavePreset();
+        _settingsButton.Click += (_, _) => OpenDeviceSettings();
         _emergencyButton.Click += (_, _) => ToggleEmergency();
 
         _micCheck.CheckedChanged += (_, _) => Toggle("mic", _micCheck.Checked);
@@ -191,7 +193,7 @@ internal sealed class MainForm : Form
     private void BuildLayout()
     {
         var top = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8, 8, 8, 4) };
-        top.Controls.AddRange([_presetCombo, _applyButton, _newButton, _duplicateButton, _renameButton, _deleteButton, _saveButton, _dirtyLabel]);
+        top.Controls.AddRange([_presetCombo, _applyButton, _newButton, _duplicateButton, _renameButton, _deleteButton, _saveButton, _settingsButton, _dirtyLabel]);
 
         var phase = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
         phase.Controls.AddRange([_phaseLabel, _emergencyButton]);
@@ -617,6 +619,16 @@ internal sealed class MainForm : Form
         }
     }
 
+    private void OpenDeviceSettings()
+    {
+        using var settings = new DeviceSettingsForm(_shell);
+        if (settings.ShowDialog(this) == DialogResult.OK)
+        {
+            ClearDirty();
+            RefreshPresets();
+            RefreshStatus();
+        }
+    }
     private string? Prompt(string text, string title, string initial = "")
     {
         var input = new TextBox { Text = initial, Dock = DockStyle.Top };
