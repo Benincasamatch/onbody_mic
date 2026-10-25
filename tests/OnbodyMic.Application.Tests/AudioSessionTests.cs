@@ -72,6 +72,7 @@ public sealed class AudioSessionTests
         Accept(env.Session.BindApplication(new AppBinding(42, "test-app")));
         Accept(env.Session.EnableApp(true));
         Accept(env.Session.PlayClip("clip.wav"));
+        env.Mic.Push(Filled(Period, 0.1f)); // keep the mic feed non-starved for the exact-value check
         env.Output.Fake.Pump(Period);
 
         Accept(env.Session.EnableExtras(false));
@@ -161,10 +162,51 @@ public sealed class AudioSessionTests
         var replayed = env.Output.Fake.Pump(Period);
         Assert.All(replayed, value => Assert.Equal(0f, value)); // nothing old comes back
 
+        // first live pull after starvation ramps in; assert the steady pull is exact
         env.Mic.Push(Filled(Period, 0.3f)); // fresh input after re-enable
+        env.Output.Fake.Pump(Period);
+        env.Mic.Push(Filled(Period, 0.3f));
         var live = env.Output.Fake.Pump(Period);
         Assert.All(live, value => Assert.Equal(0.3f, value, 4));
         env.Dispose();
+    }
+
+    [Fact]
+    public void Adaptive_rate_keeps_a_deep_queue_pull_clean_end_to_end()
+    {
+        // separate session with adaptive ON: a slow producer (drift) must not
+        // starve full pulls once the queue sits at the watermark
+        var mic = new FakeSourceAdapter();
+        var output = new OutputSlot();
+        using var session = new AudioSession(new AudioSessionOptions
+        {
+            ClipDecoder = new FakeDecoder(),
+            MicAdapterFactory = channel =>
+            {
+                mic.Channel = channel;
+                return mic;
+            },
+            AppAdapterFactory = (_, _) => throw new InvalidOperationException("unused"),
+            OutputFactory = output.Create,
+            MonitorOutputFactory = () => throw new InvalidOperationException("unused"),
+            AdaptiveRate = true,
+            SourcePrerollTimeoutMs = 20,
+        });
+        session.AttachOutput();
+
+        var watermark = EngineFormat.TimeToFrames(TimeSpan.FromMilliseconds(60));
+        mic.OnStart = () => mic.Push(Filled(watermark, 0.5f));
+        Accept(session.EnableMic(true));
+
+        for (var period = 0; period < 800; period++)
+        {
+            mic.Push(Filled(439, 0.5f)); // producer 0.45% slow: ratio must settle below 1
+            var mixed = output.Fake.Pump(Period);
+            Assert.All(mixed, value => Assert.Equal(0.5f, value, 3));
+        }
+
+        Assert.Equal(0, session.Metrics().MixerUnderrunFrames);
+        Assert.True(session.Metrics().MicRatio < 1.0);
     }
 
     [Fact]
@@ -397,6 +439,39 @@ public sealed class AudioSessionTests
         return condition();
     }
 
+    [Fact]
+    public void Enable_mic_with_preroll_available_flips_switch_immediately()
+    {
+        var env = SessionEnv.Create();
+        env.Session.AttachOutput();
+        env.Mic.OnStart = () => env.Mic.Push(new float[EngineFormat.TimeToFrames(TimeSpan.FromMilliseconds(50))]);
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        Accept(env.Session.EnableMic(true));
+        watch.Stop();
+
+        var status = env.Session.Status();
+        Assert.True(status.Switches.MicSendEnabled);
+        Assert.True(watch.ElapsedMilliseconds < 100, $"enable took {watch.ElapsedMilliseconds}ms; pre-roll wait should not time out");
+        env.Dispose();
+    }
+
+    [Fact]
+    public void Enable_mic_without_frames_still_succeeds_after_bounded_wait()
+    {
+        var env = SessionEnv.Create();
+        env.Session.AttachOutput();
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        Accept(env.Session.EnableMic(true));
+        watch.Stop();
+
+        var status = env.Session.Status();
+        Assert.True(status.Switches.MicSendEnabled); // timeout path: silence, not failure
+        Assert.True(watch.ElapsedMilliseconds >= 20, "bounded pre-roll wait should have run");
+        env.Dispose();
+    }
+
     /// <summary>Wires a session with fake adapters; each test reads the instances it needs.</summary>
     private sealed class SessionEnv : IDisposable
     {
@@ -451,6 +526,8 @@ public sealed class AudioSessionTests
                 OutputFactory = output.Create,
                 MonitorOutputFactory = monitorOutput.Create,
                 MonitorCaptureFactory = router => monitorCapture.Create(),
+                SourcePrerollTimeoutMs = 20,
+                AdaptiveRate = false,
             });
             return new SessionEnv(session, decoder, mic, app, output, monitorOutput, monitorCapture);
         }

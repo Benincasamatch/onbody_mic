@@ -150,4 +150,46 @@ public sealed class SendMixerTests
             GainsProvider = () => routeGains,
         };
     }
+
+    [Fact]
+    public void Partial_pull_fades_out_and_resume_fades_in()
+    {
+        var mic = new SourceChannel("mic", AudioKind.Microphone, 100);
+        mic.SetTicket(new SourceTicket("mic", AudioKind.Microphone, Epoch, 1));
+        mic.Push(new float[] { 1f, 1f, 1f });
+
+        var switches = SessionSwitches.AllOff with { MicSendEnabled = true };
+        var mixer = Build(switches, clip: null);
+        mixer.Add(mic);
+
+        // partial pull: tail must decay instead of hard-stepping to silence
+        var output = new float[5];
+        mixer.Read(output);
+        Assert.Equal(1f, output[0], 3);
+        Assert.Equal(1f / 3f, output[2], 3); // 3-sample fade-out tail
+        Assert.Equal(0f, output[3]);
+
+        // resume with a full pull: head ramps in from zero
+        mic.Push(new float[] { 1f, 1f, 1f, 1f, 1f });
+        mixer.Read(output);
+        Assert.Equal(0f, output[0], 3);
+        Assert.Equal(0.2f, output[1], 3);
+        Assert.Equal(0.8f, output[4], 3);
+    }
+
+    [Fact]
+    public void Hard_steps_are_counted_for_forensics()
+    {
+        var mic = new SourceChannel("mic", AudioKind.Microphone, 100);
+        mic.SetTicket(new SourceTicket("mic", AudioKind.Microphone, Epoch, 1));
+        mic.Push(new float[] { -0.9f, 0.9f }); // one-sample jump of 1.8
+
+        var switches = SessionSwitches.AllOff with { MicSendEnabled = true };
+        var mixer = Build(switches, clip: null);
+        mixer.Add(mic);
+
+        var output = new float[2];
+        mixer.Read(output);
+        Assert.Equal(1, mixer.HardSteps);
+    }
 }

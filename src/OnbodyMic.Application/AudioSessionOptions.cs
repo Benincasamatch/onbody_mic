@@ -35,4 +35,15 @@ public sealed class AudioSessionOptions
 
     /// <summary>Largest single pull the output pump may request (scratch sizing).</summary>
     public int MaxPeriodFrames { get; init; } = EngineFormat.TimeToFrames(TimeSpan.FromMilliseconds(200));
+
+    /// <summary>Queue watermark the adaptive pull ratio holds for live capture channels (drift absorption).</summary>
+    public int MicAdaptiveTargetFrames { get; init; } = EngineFormat.TimeToFrames(TimeSpan.FromMilliseconds(60));
+
+    public int AppAdaptiveTargetFrames { get; init; } = EngineFormat.TimeToFrames(TimeSpan.FromMilliseconds(60));
+
+    /// <summary>Master switch for adaptive pull; disable for exact-value deterministic tests.</summary>
+    public bool AdaptiveRate { get; init; } = true;
+
+    /// <summary>Upper bound for the enable-time wait on first captured frames; enables anyway on timeout (silence, not failure).</summary>
+    public int SourcePrerollTimeoutMs { get; init; } = 150;
 }

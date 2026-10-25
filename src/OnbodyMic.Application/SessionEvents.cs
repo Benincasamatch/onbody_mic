@@ -37,4 +37,7 @@ public sealed record SessionMetrics(
     long MixerClippedSamples,
     long MixerUnderrunFrames,
     long MixerDeniedPulls,
-    float MixerPeak);
+    long MixerHardSteps,
+    float MixerPeak,
+    double MicRatio,
+    double AppRatio);

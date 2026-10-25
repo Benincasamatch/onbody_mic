@@ -75,4 +75,49 @@ public sealed class SourceChannelTests
         Assert.Equal(new float[] { 4, 5 }, buffer);
         Assert.Equal(3, channel.Stats().DeniedFrames);
     }
+
+    [Fact]
+    public void Adaptive_rate_absorbs_slow_producer_without_underrun()
+    {
+        // producer clock 0.23% slow (real drift observed in P1 KOOK testing)
+        var channel = new SourceChannel("mic", AudioKind.Microphone, 44100);
+        channel.SetTicket(new SourceTicket("mic", AudioKind.Microphone, 1, 1));
+        channel.EnableAdaptiveRate(targetQueuedFrames: 2646); // 60 ms
+        channel.Push(new float[2646]); // start at the watermark
+
+        var output = new float[882];
+        var underruns = 0;
+        for (var period = 0; period < 600; period++)
+        {
+            channel.Push(new float[880]);
+            if (channel.Pull(output, 882) < 882)
+            {
+                underruns++;
+            }
+        }
+
+        Assert.Equal(0, underruns);
+        Assert.True(channel.QueuedFrames > 0);
+        Assert.True(channel.Ratio < 1.0); // consumption slowed to match the producer
+    }
+
+    [Fact]
+    public void Adaptive_rate_absorbs_fast_producer_without_overflow()
+    {
+        var channel = new SourceChannel("app", AudioKind.Application, 44100);
+        channel.SetTicket(new SourceTicket("app", AudioKind.Application, 1, 1));
+        channel.EnableAdaptiveRate(targetQueuedFrames: 2646);
+        channel.Push(new float[2646]);
+
+        var output = new float[882];
+        for (var period = 0; period < 600; period++)
+        {
+            channel.Push(new float[884]); // producer 0.23% fast
+            channel.Pull(output, 882);
+        }
+
+        Assert.Equal(0, channel.Stats().DroppedFrames); // nothing evicted
+        Assert.True(channel.Ratio > 1.0);
+        Assert.True(channel.QueuedFrames < 44100);
+    }
 }

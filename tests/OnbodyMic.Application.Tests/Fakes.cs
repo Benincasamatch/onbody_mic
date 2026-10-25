@@ -15,6 +15,9 @@ public sealed class FakeSourceAdapter : IAudioSourceAdapter
 
     public string? StartError { get; set; }
 
+    /// <summary>Invoked inside Start; simulates a source that already has pre-roll buffered.</summary>
+    public Action? OnStart { get; set; }
+
     public event Action<string?>? Ended;
 
     public void Start()
@@ -24,6 +27,7 @@ public sealed class FakeSourceAdapter : IAudioSourceAdapter
             throw new COMException(StartError);
         }
 
+        OnStart?.Invoke();
         Started = true;
     }
 

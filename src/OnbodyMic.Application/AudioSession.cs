@@ -40,6 +40,11 @@ public sealed class AudioSession : IDisposable
         _commands = new SessionCommandQueue();
         _micChannel = new SourceChannel("mic", AudioKind.Microphone, options.MicQueueFrames);
         _appChannel = new SourceChannel("app", AudioKind.Application, options.AppQueueFrames);
+        if (options.AdaptiveRate)
+        {
+            _micChannel.EnableAdaptiveRate(options.MicAdaptiveTargetFrames);
+            _appChannel.EnableAdaptiveRate(options.AppAdaptiveTargetFrames);
+        }
         _runtime = BuildRuntime();
         _clipPlayer = new ClipPlayer();
         _clipFeed = new ClipFeed(_clipPlayer);
@@ -181,7 +186,10 @@ public sealed class AudioSession : IDisposable
         _mixer.ClippedSamples,
         _mixer.UnderrunFrames,
         _mixer.DeniedPulls,
-        _mixer.Peak);
+        _mixer.HardSteps,
+        _mixer.Peak,
+        _micChannel.Ratio,
+        _appChannel.Ratio);
 
     public void Dispose()
     {
@@ -221,6 +229,16 @@ public sealed class AudioSession : IDisposable
             return CommandResult.Reject("output-lost");
         }
 
+        var authorized = Engine.AuthorizeSource("mic", AudioKind.Microphone);
+        if (!authorized.Accepted)
+        {
+            return authorized;
+        }
+
+        // ticket first so capture frames buffer from the very first callback;
+        // the send switch only flips after a short pre-roll, so the mixer
+        // never starts a live source from an empty queue (startup pop)
+        _micChannel.SetTicket(Engine.CreateTicket("mic", AudioKind.Microphone));
         if (_micAdapter is null)
         {
             try
@@ -232,6 +250,7 @@ public sealed class AudioSession : IDisposable
             catch (Exception ex)
             {
                 _micAdapter = SafeDispose(_micAdapter);
+                _micChannel.SetTicket(null);
                 _ = Engine.SourceFailed("mic");
                 PublishState();
                 Notice(SessionNoticeKind.SourceFaulted, $"mic start failed: {ex.Message}");
@@ -239,13 +258,7 @@ public sealed class AudioSession : IDisposable
             }
         }
 
-        var authorized = Engine.AuthorizeSource("mic", AudioKind.Microphone);
-        if (!authorized.Accepted)
-        {
-            return authorized;
-        }
-
-        _micChannel.SetTicket(Engine.CreateTicket("mic", AudioKind.Microphone));
+        WaitForPreroll(_micChannel);
         var setResult = Engine.SetMicSend(true);
         PublishState();
         return setResult;
@@ -282,19 +295,30 @@ public sealed class AudioSession : IDisposable
             return result;
         }
 
-        var setResult = Engine.SetAppSend(true);
-        if (!setResult.Accepted)
+        // mirror the engine's enable rules without flipping the switch early;
+        // the switch only flips after pre-roll so the app feed starts full
+        if (Engine.EmergencyLatched)
         {
-            return setResult;
+            return CommandResult.Reject("emergency-latched");
+        }
+
+        if (!Engine.Switches.ExtrasSendEnabled)
+        {
+            return CommandResult.Reject("extras-disabled");
         }
 
         if (_appBinding is null)
         {
-            _ = Engine.SetAppSend(false);
-            PublishState();
             return CommandResult.Reject("no-app-bound");
         }
 
+        var authorized = Engine.AuthorizeSource("app", AudioKind.Application);
+        if (!authorized.Accepted)
+        {
+            return authorized;
+        }
+
+        _appChannel.SetTicket(Engine.CreateTicket("app", AudioKind.Application));
         if (_appAdapter is null)
         {
             try
@@ -306,7 +330,7 @@ public sealed class AudioSession : IDisposable
             catch (Exception ex)
             {
                 _appAdapter = SafeDispose(_appAdapter);
-                _ = Engine.SetAppSend(false);
+                _appChannel.SetTicket(null);
                 _ = Engine.SourceFailed("app");
                 PublishState();
                 Notice(SessionNoticeKind.SourceFaulted, $"app capture start failed: {ex.Message}");
@@ -314,10 +338,10 @@ public sealed class AudioSession : IDisposable
             }
         }
 
-        var authorized = Engine.AuthorizeSource("app", AudioKind.Application);
-        _appChannel.SetTicket(Engine.CreateTicket("app", AudioKind.Application));
+        WaitForPreroll(_appChannel);
+        var setResult = Engine.SetAppSend(true);
         PublishState();
-        return authorized;
+        return setResult;
     }
 
     private CommandResult DoStartClip(string path, bool send)
@@ -480,6 +504,22 @@ public sealed class AudioSession : IDisposable
     {
         _mixer.Read(destination);
         return destination.Length;
+    }
+
+    /// <summary>
+    /// Blocks (bounded) until the source produced its first frames. The queue
+    /// itself cannot accumulate pre-switch: the pump keeps draining while the
+    /// gate is closed (T09 — pre-enable frames must never be sent), so the
+    /// meaningful precondition is that capture is actually flowing.
+    /// </summary>
+    private void WaitForPreroll(SourceChannel channel)
+    {
+        var pushedAtStart = channel.Stats().PushedFrames;
+        var deadline = Environment.TickCount64 + _options.SourcePrerollTimeoutMs;
+        while (channel.Stats().PushedFrames == pushedAtStart && Environment.TickCount64 < deadline)
+        {
+            Thread.Sleep(5);
+        }
     }
 
     private void StopAppCapture()

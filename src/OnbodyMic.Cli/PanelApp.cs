@@ -218,9 +218,9 @@ internal static class PanelApp
     {
         var m = session.Metrics();
         Console.WriteLine(
-            $"mic q={m.Mic.QueuedFrames} drop={m.Mic.DroppedFrames} deny={m.Mic.DeniedFrames} | " +
-            $"app q={m.App.QueuedFrames} drop={m.App.DroppedFrames} deny={m.App.DeniedFrames} | " +
-            $"mix peak={m.MixerPeak:F3} clip={m.MixerClippedSamples} under={m.MixerUnderrunFrames} denied={m.MixerDeniedPulls} | " +
+            $"mic q={m.Mic.QueuedFrames}({m.MicRatio:F4}) drop={m.Mic.DroppedFrames} deny={m.Mic.DeniedFrames} | " +
+            $"app q={m.App.QueuedFrames}({m.AppRatio:F4}) drop={m.App.DroppedFrames} deny={m.App.DeniedFrames} | " +
+            $"mix peak={m.MixerPeak:F3} clip={m.MixerClippedSamples} under={m.MixerUnderrunFrames} denied={m.MixerDeniedPulls} hard={m.MixerHardSteps} | " +
             $"mon q={m.Monitor.QueuedFrames} drop={m.Monitor.FullEndpointDroppedFrames}");
     }
 
