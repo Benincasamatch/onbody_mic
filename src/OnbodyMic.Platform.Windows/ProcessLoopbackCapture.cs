@@ -272,7 +272,7 @@ internal interface IActivateAudioInterfaceAsyncOperationCom
 }
 
 [ComImport, Guid("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-internal interface IAudioClientCom
+public interface IAudioClientCom
 {
     [PreserveSig]
     int Initialize(int shareMode, int streamFlags, long bufferDuration, long periodicity, IntPtr format, IntPtr audioSessionGuid);
@@ -312,7 +312,7 @@ internal interface IAudioClientCom
 }
 
 [ComImport, Guid("C8ADBD64-E71E-48A0-A4DE-185C395CD317"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-internal interface IAudioCaptureClientCom
+public interface IAudioCaptureClientCom
 {
     [PreserveSig]
     int GetBuffer(out IntPtr data, out uint frames, out uint flags, out ulong devicePosition, out ulong qpcPosition);

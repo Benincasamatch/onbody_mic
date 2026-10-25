@@ -1,5 +1,6 @@
 namespace OnbodyMic.Cli;
 
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Diagnostics;
 using System.Linq;
@@ -63,7 +64,7 @@ internal static class Program
               proloop --pid <n> --out <file.wav> [--seconds s] [--mode include|exclude]
                                                       per-process loopback capture to wav (T04/T05)
               latmatrix (--render <i> | --render-id <id>) (--capture <i> | --capture-id <id>)
-                    [--bursts n] [--period-ms n] [--burst-ms n]
+                    [--bursts n] [--period-ms n] [--burst-ms n] [--engine mmcss|naudio]
                                                       200-burst engine->virtual-input latency matrix
               enable --id <id> | disable --id <id>    toggle a disabled MMDevice endpoint (IPolicyConfig)
               setformat --id <id> --rate <hz> [--channels c]
@@ -509,6 +510,13 @@ internal static class Program
             return 1;
         }
 
+        var engine = options.GetValueOrDefault("engine", "mmcss");
+        if (engine.Equals("mmcss", StringComparison.OrdinalIgnoreCase))
+        {
+            return LatMatrixMmcss(renderDevice.ID, cableDevice.ID, burstCount, periodMs, burstMs,
+                (int)ParseDouble(options, "render-latency", 10), (int)ParseDouble(options, "capture-latency", 10));
+        }
+
         var provider = new BurstWaveProvider(rate, 2, 440, 0.35, burstMs, periodMs);
         var onsets = new List<long>();
         long totalSamples = 0;
@@ -575,6 +583,202 @@ internal static class Program
         return 0;
     }
 
+
+    /// <summary>
+    /// Latency matrix on own MMCSS-boosted event-driven pumps: exclusive render + shared
+    /// capture, both on Highest-priority threads registered as Pro Audio. This is the seed
+    /// of the P1 audio engine; NAudio's normal-priority threads cannot hold 10ms deadlines.
+    /// </summary>
+    private static int LatMatrixMmcss(string renderId, string cableId, int burstCount, int periodMs, int burstMs, int renderBufferMs, int captureBufferMs)
+    {
+        const int rate = 44100;
+        var burstFrames = rate * burstMs / 1000;
+        var periodFrames = rate * periodMs / 1000;
+        var generated = new List<long>();
+        var onsets = new List<long>();
+        long totalFrames = 0;
+        long lastOnsetFrame = -2 * (long)(0.08 * rate);
+        long quietGap = (long)(0.08 * rate);
+        const float threshold = 0.1f;
+        var maxAbs = 0f;
+        var running = true;
+
+        var renderClient = WindowsLowLevelAudio.ActivateClient(renderId);
+        var formatPtr = WindowsLowLevelAudio.CreateWaveFormatPcm16(rate, 2);
+        var renderHns = renderBufferMs * 10000L;
+        Marshal.ThrowExceptionForHR(renderClient.Initialize(
+            WindowsLowLevelAudio.ShareModeExclusive, WindowsLowLevelAudio.StreamFlagsEventCallback,
+            renderHns, renderHns, formatPtr, IntPtr.Zero));
+        Marshal.ThrowExceptionForHR(renderClient.GetBufferSize(out var bufferFrames));
+        var renderIid = WindowsLowLevelAudio.IidIAudioRenderClient;
+        Marshal.ThrowExceptionForHR(renderClient.GetService(ref renderIid, out var renderService));
+        var render = (IAudioRenderClientCom)renderService;
+        var renderEvent = WindowsLowLevelAudio.CreateEventHandle();
+        Marshal.ThrowExceptionForHR(renderClient.SetEventHandle(renderEvent));
+
+        var captureClient = WindowsLowLevelAudio.ActivateClient(cableId);
+        Marshal.ThrowExceptionForHR(captureClient.GetMixFormat(out var mixFormatPtr));
+        var channels = Marshal.ReadInt16(mixFormatPtr, 2);
+        var captureRate = Marshal.ReadInt32(mixFormatPtr, 4);
+        var captureIid = WindowsLowLevelAudio.IidIAudioCaptureClient;
+        Marshal.ThrowExceptionForHR(captureClient.Initialize(
+            WindowsLowLevelAudio.ShareModeShared, WindowsLowLevelAudio.StreamFlagsEventCallback,
+            captureBufferMs * 10000L, 0, mixFormatPtr, IntPtr.Zero));
+        Marshal.ThrowExceptionForHR(captureClient.GetService(ref captureIid, out var captureService));
+        var capture = (IAudioCaptureClientCom)captureService;
+        var captureEvent = WindowsLowLevelAudio.CreateEventHandle();
+        Marshal.ThrowExceptionForHR(captureClient.SetEventHandle(captureEvent));
+
+        var captureThread = new Thread(() =>
+        {
+            using var mmcss = new MmcssScope();
+            mmcss.Acquire();
+            Thread.CurrentThread.Priority = ThreadPriority.Highest;
+            Marshal.ThrowExceptionForHR(captureClient.Start());
+            while (running)
+            {
+                if (WindowsLowLevelAudio.WaitForEvent(captureEvent, 2000) != 0)
+                {
+                    continue;
+                }
+
+                while (true)
+                {
+                    Marshal.ThrowExceptionForHR(capture.GetNextPacketSize(out var frames));
+                    if (frames == 0)
+                    {
+                        break;
+                    }
+
+                    Marshal.ThrowExceptionForHR(capture.GetBuffer(out var data, out frames, out _, out _, out _));
+                    var tick = Stopwatch.GetTimestamp();
+                    var floatCount = (int)frames * channels;
+                    for (var i = 0; i < floatCount; i += channels)
+                    {
+                        var value = Math.Abs(BitConverter.Int32BitsToSingle(Marshal.ReadInt32(data, i * sizeof(float))));
+                        maxAbs = Math.Max(maxAbs, value);
+                        var framePosition = totalFrames + (i / channels);
+                        if (value > threshold && framePosition - lastOnsetFrame >= quietGap)
+                        {
+                            onsets.Add(tick);
+                            lastOnsetFrame = framePosition;
+                        }
+                    }
+
+                    totalFrames += frames;
+                    Marshal.ThrowExceptionForHR(capture.ReleaseBuffer(frames));
+                }
+            }
+        })
+        { IsBackground = true, Name = "mmcss-capture" };
+
+        long renderWritten = 0;
+        long renderEvents = 0;
+        long renderOffered = 0;
+        long lastPadding = -1;
+        var renderFault = string.Empty;
+        var renderThread = new Thread(() =>
+        {
+        try
+        {
+            using var mmcss = new MmcssScope();
+            mmcss.Acquire();
+            Thread.CurrentThread.Priority = ThreadPriority.Highest;
+            var phase = 0.0;
+            long written = 0;
+            long nextBoundary = 0;
+            void FillRender(int frames)
+            {
+                Marshal.ThrowExceptionForHR(render.GetBuffer(frames, out var data));
+                for (var f = 0; f < frames; f++)
+                {
+                    if (written >= nextBoundary)
+                    {
+                        generated.Add(Stopwatch.GetTimestamp());
+                        nextBoundary += periodFrames;
+                    }
+
+                    var inBurst = (written % periodFrames) < burstFrames;
+                    var value = inBurst ? Math.Sin(phase) * 0.35 * short.MaxValue : 0;
+                    Marshal.WriteInt16(data, (f * 2) * sizeof(short), (short)value);
+                    Marshal.WriteInt16(data, ((f * 2) + 1) * sizeof(short), (short)value);
+                    phase += 2.0 * Math.PI * 440 / rate;
+                    if (phase > 2.0 * Math.PI)
+                    {
+                        phase -= 2.0 * Math.PI;
+                    }
+
+                    written++;
+                }
+
+                renderWritten = written;
+                Marshal.ThrowExceptionForHR(render.ReleaseBuffer(frames, 0));
+            }
+
+            // exclusive event-mode contract: prefill the whole buffer, then one event
+            // equals one full buffer period. CurrentPadding is unreliable here (the Steam
+            // driver mis-paces under-filled streams at ~0.65x realtime) — NAudio writes
+            // full bufferFrames per event for the same reason.
+            FillRender((int)bufferFrames);
+            Marshal.ThrowExceptionForHR(renderClient.Start());
+            while (running && generated.Count < burstCount + 5)
+            {
+                if (WindowsLowLevelAudio.WaitForEvent(renderEvent, 2000) != 0)
+                {
+                    continue;
+                }
+
+                renderEvents++;
+                renderOffered += bufferFrames;
+                FillRender((int)bufferFrames);
+            }
+
+        }
+        catch (Exception ex)
+        {
+            renderFault = ex.ToString();
+        }
+        })
+        { IsBackground = true, Name = "mmcss-render" };
+
+        captureThread.Start();
+        Thread.Sleep(500);
+        renderThread.Start();
+        Thread.Sleep(TimeSpan.FromSeconds(burstCount * periodMs / 1000.0 + 1));
+        running = false;
+        renderThread.Join(1000);
+        captureThread.Join(1000);
+        _ = renderClient.Stop();
+        _ = captureClient.Stop();
+        Console.WriteLine($"render_diag events={renderEvents} offered={renderOffered} written={renderWritten} buffer_frames={bufferFrames} last_padding={lastPadding} fault={(string.IsNullOrEmpty(renderFault) ? "none" : renderFault)}");
+        WindowsLowLevelAudio.CloseEventHandle(renderEvent);
+        WindowsLowLevelAudio.CloseEventHandle(captureEvent);
+        Marshal.FreeHGlobal(formatPtr);
+        Marshal.FreeCoTaskMem(mixFormatPtr);
+        _ = Marshal.ReleaseComObject(renderClient);
+        _ = Marshal.ReleaseComObject(captureClient);
+
+        var usable = Math.Min(generated.Count, onsets.Count) - 5;
+        if (usable < 10)
+        {
+            Console.Error.WriteLine($"insufficient samples: generated={generated.Count} detected={onsets.Count} render_written={renderWritten} fault={(string.IsNullOrEmpty(renderFault) ? "none" : renderFault)}");
+            return 2;
+        }
+
+        var latencies = new List<double>();
+        for (var i = 5; i < 5 + usable; i++)
+        {
+            latencies.Add((onsets[i] - generated[i]) * 1000.0 / Stopwatch.Frequency);
+        }
+
+        latencies.Sort();
+        double Percentile(int p) => latencies[Math.Min(latencies.Count - 1, latencies.Count * p / 100)];
+        Console.WriteLine($"engine=mmcss render={renderBufferMs}ms capture={captureBufferMs}ms cable_rate={captureRate}");
+        Console.WriteLine($"capture_frames={totalFrames} max_abs={maxAbs:F3}");
+        Console.WriteLine($"bursts generated={generated.Count} detected={onsets.Count} matched={latencies.Count} missed={generated.Count - onsets.Count}");
+        Console.WriteLine($"latency_ms p50={Percentile(50):F1} p95={Percentile(95):F1} p99={Percentile(99):F1} max={latencies[^1]:F1} min={latencies[0]:F1}");
+        return 0;
+    }
     private static int ProcLoop(string[] rest)
     {
         var options = ParseOptions(rest);
