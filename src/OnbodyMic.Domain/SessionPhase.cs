@@ -8,4 +8,5 @@ public enum SessionPhase
     Running = 3,
     FaultedMuted = 4,
     EmergencyMuted = 5,
+    OutputLost = 6,
 }

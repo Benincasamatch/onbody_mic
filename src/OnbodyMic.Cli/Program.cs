@@ -30,7 +30,7 @@ internal static class Program
                 "mixloop" => MixLoop(args[1..]),
                 "latency" => LatencyProbe(args[1..]),
                 "proloop" => ProcLoop(args[1..]),
-                "latmatrix" => LatMatrix(args[1..]),
+                "panel" => PanelApp.Run(args[1..]),
                 _ => Usage(),
             };
         }
@@ -67,6 +67,9 @@ internal static class Program
                     [--bursts n] [--period-ms n] [--burst-ms n] [--engine mmcss|naudio]
                                                       200-burst engine->virtual-input latency matrix
               enable --id <id> | disable --id <id>    toggle a disabled MMDevice endpoint (IPolicyConfig)
+              setformat --id <id> --rate <hz> [--channels c]
+              panel [--mic-id id] [--render-id id] [--capture-id id] [--monitor-id id] [--app-pid n]
+                                                      interactive P1 control panel (real session)
               setformat --id <id> --rate <hz> [--channels c]
                                                       set endpoint shared-mode format to float32 (IPolicyConfig)
             """);
@@ -145,6 +148,7 @@ internal static class Program
     }
     private static int PlayTone(string[] rest)
     {
+        Console.Error.WriteLine($"pid={Environment.ProcessId}");
         var options = ParseOptions(rest);
         if (!options.ContainsKey("id") && !options.ContainsKey("index"))
         {
@@ -214,11 +218,7 @@ internal static class Program
         capture.RecordingStopped += (_, _) => finished.Set();
         capture.StartRecording();
         Console.WriteLine($"recording {seconds:N1}s from: {device.FriendlyName}");
-        if (!finished.WaitOne(TimeSpan.FromSeconds(seconds + 5)))
-        {
-            Thread.Sleep(TimeSpan.FromSeconds(seconds));
-        }
-
+        Thread.Sleep(TimeSpan.FromSeconds(seconds));
         capture.StopRecording();
         finished.WaitOne(TimeSpan.FromSeconds(2));
         writer.Flush();

@@ -27,9 +27,19 @@ public sealed class ProcessLoopbackCapture : IDisposable
     private Thread? _captureThread;
     private volatile bool _running;
 
-    public WaveFormat WaveFormat { get; } = new(44100, 16, 2);
+    /// <summary>Raised when the capture loop dies (target gone, device fault); never thrown on the thread.</summary>
+    public event Action<Exception>? Faulted;
 
-    /// <summary>Raw captured frames (16-bit PCM 44.1kHz stereo) as they arrive.</summary>
+    public WaveFormat WaveFormat { get; }
+
+    /// <param name="rate">Capture sample rate (AUTOCONVERTPCM resamples in the engine).</param>
+    /// <param name="channels">Capture channels; 1 matches the engine bus directly.</param>
+    public ProcessLoopbackCapture(int rate = 44100, int channels = 2)
+    {
+        WaveFormat = new WaveFormat(rate, 16, channels);
+    }
+
+    /// <summary>Raw captured frames (16-bit PCM) as they arrive.</summary>
     public event Action<byte[], int>? DataAvailable;
 
     public void Start(uint targetProcessId, bool includeProcessTree)
@@ -123,46 +133,56 @@ public sealed class ProcessLoopbackCapture : IDisposable
 
     private void CaptureLoop()
     {
-        while (_running)
+        try
         {
-            if (NativeMethods.WaitForSingleObject(_sampleReadyEvent, 200) != 0)
-            {
-                continue;
-            }
-
             while (_running)
             {
-                Marshal.ThrowExceptionForHR(_captureClient!.GetNextPacketSize(out var frames));
-                if (frames == 0)
+                if (NativeMethods.WaitForSingleObject(_sampleReadyEvent, 200) != 0)
                 {
-                    break;
+                    continue;
                 }
 
-                Marshal.ThrowExceptionForHR(_captureClient.GetBuffer(
-                    out var data, out var packetFrames, out var flags, out _, out _));
-                var bytes = (int)(packetFrames * WaveFormat.BlockAlign);
-                var buffer = new byte[bytes];
-                if (data != IntPtr.Zero && (flags & AudclntBufferflagsSilent) == 0)
+                while (_running)
                 {
-                    Marshal.Copy(data, buffer, 0, bytes);
-                }
+                    Marshal.ThrowExceptionForHR(_captureClient!.GetNextPacketSize(out var frames));
+                    if (frames == 0)
+                    {
+                        break;
+                    }
 
-                Marshal.ThrowExceptionForHR(_captureClient.ReleaseBuffer(packetFrames));
-                DataAvailable?.Invoke(buffer, bytes);
+                    Marshal.ThrowExceptionForHR(_captureClient.GetBuffer(
+                        out var data, out var packetFrames, out var flags, out _, out _));
+                    var bytes = (int)(packetFrames * WaveFormat.BlockAlign);
+                    var buffer = new byte[bytes];
+                    if (data != IntPtr.Zero && (flags & AudclntBufferflagsSilent) == 0)
+                    {
+                        Marshal.Copy(data, buffer, 0, bytes);
+                    }
+
+                    Marshal.ThrowExceptionForHR(_captureClient.ReleaseBuffer(packetFrames));
+                    DataAvailable?.Invoke(buffer, bytes);
+                }
             }
+        }
+        catch (Exception ex)
+        {
+            // target process exit surfaces here as a buffer error; the session
+            // decides whether this is a normal end or a fault
+            Faulted?.Invoke(ex);
         }
     }
 
-    private static IntPtr BuildWaveFormatPointer()
+    private IntPtr BuildWaveFormatPointer()
     {
+        var blockAlign = (short)(WaveFormat.Channels * 2);
         var ptr = Marshal.AllocHGlobal(18);
-        Marshal.WriteInt16(ptr, 0, 1);        // WAVE_FORMAT_PCM
-        Marshal.WriteInt16(ptr, 2, 2);        // channels
-        Marshal.WriteInt32(ptr, 4, 44100);    // samples per second
-        Marshal.WriteInt32(ptr, 8, 44100 * 4);// avg bytes per second
-        Marshal.WriteInt16(ptr, 12, 4);       // block align
-        Marshal.WriteInt16(ptr, 14, 16);      // bits per sample
-        Marshal.WriteInt16(ptr, 16, 0);       // cbSize
+        Marshal.WriteInt16(ptr, 0, 1);                          // WAVE_FORMAT_PCM
+        Marshal.WriteInt16(ptr, 2, (short)WaveFormat.Channels); // channels
+        Marshal.WriteInt32(ptr, 4, WaveFormat.SampleRate);      // samples per second
+        Marshal.WriteInt32(ptr, 8, WaveFormat.SampleRate * blockAlign); // avg bytes per second
+        Marshal.WriteInt16(ptr, 12, blockAlign);                // block align
+        Marshal.WriteInt16(ptr, 14, 16);                        // bits per sample
+        Marshal.WriteInt16(ptr, 16, 0);                         // cbSize
         return ptr;
     }
 

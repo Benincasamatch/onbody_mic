@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>OnbodyMic.Audio</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OnbodyMic.Domain\OnbodyMic.Domain.csproj" />
+  </ItemGroup>
+</Project>

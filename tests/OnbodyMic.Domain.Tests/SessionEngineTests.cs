@@ -198,6 +198,32 @@ public sealed class SessionEngineTests
         Assert.Equal(SendDenialReason.EmergencyLatched, engine.Gate.Decide(micTicket!, engine.Snapshot()).Reason);
     }
 
+    [Fact]
+    public void OutputFailed_closes_all_send_but_keeps_monitor_and_latch()
+    {
+        var engine = Ready();
+        engine.SetMicSend(true);
+        engine.SetExtrasSend(true);
+        engine.SetAppSend(true);
+        engine.SetMonitor(true, MonitorMode.FullEndpoint);
+        var micTicket = Authorize(engine, "mic", AudioKind.Microphone);
+        var appTicket = Authorize(engine, "app", AudioKind.Application);
+
+        engine.OutputFailed();
+
+        Assert.Equal(SessionPhase.OutputLost, engine.Phase);
+        Assert.False(engine.Switches.MicSendEnabled);
+        Assert.False(engine.Switches.ExtrasSendEnabled);
+        Assert.False(engine.Switches.AppSendEnabled);
+        // monitoring path survives a virtual-output failure
+        Assert.True(engine.Switches.MonitorEnabled);
+        Assert.Equal(SendDenialReason.StaleSessionEpoch, engine.Gate.Decide(micTicket!, engine.Snapshot()).Reason);
+        Assert.Equal(SendDenialReason.StaleSessionEpoch, engine.Gate.Decide(appTicket!, engine.Snapshot()).Reason);
+
+        engine.ValidateDevices();
+        Assert.NotEqual(SessionPhase.OutputLost, engine.Phase);
+    }
+
     private static SessionEngine Ready()
     {
         var engine = new SessionEngine();

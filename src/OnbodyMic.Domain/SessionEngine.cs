@@ -33,6 +33,10 @@ public sealed class SessionEngine
 
     public bool DevicesValidated { get; private set; }
 
+    /// <summary>True once the virtual output device failed; cleared by ValidateDevices
+    /// after a fresh output is attached and verified.</summary>
+    public bool OutputLost { get; private set; }
+
     public string? LastPresetId { get; private set; }
 
     public bool MonitorSuspendedForPreview { get; private set; }
@@ -44,6 +48,11 @@ public sealed class SessionEngine
             if (EmergencyLatched)
             {
                 return SessionPhase.EmergencyMuted;
+            }
+
+            if (OutputLost)
+            {
+                return SessionPhase.OutputLost;
             }
 
             if (!DevicesValidated)
@@ -62,6 +71,7 @@ public sealed class SessionEngine
     public CommandResult ValidateDevices()
     {
         DevicesValidated = true;
+        OutputLost = false;
         return CommandResult.Ok;
     }
 
@@ -234,6 +244,18 @@ public sealed class SessionEngine
         }
 
         ClearClip();
+        return CommandResult.Ok;
+    }
+
+    /// Virtual output failure closes every outbound path (mic, app, clip send)
+    /// but leaves monitoring and the emergency latch untouched.
+    public CommandResult OutputFailed()
+    {
+        Switches = Switches with { MicSendEnabled = false, ExtrasSendEnabled = false, AppSendEnabled = false };
+        ClearClip();
+        InvalidateAllSources();
+        SessionEpoch++;
+        OutputLost = true;
         return CommandResult.Ok;
     }
 
