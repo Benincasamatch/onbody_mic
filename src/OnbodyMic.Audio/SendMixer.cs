@@ -15,6 +15,7 @@ public sealed class SendMixer
 {
     private const int FadeFrames = 128; // ~2.9 ms @ 44.1 kHz
     private const float HardStepThreshold = 0.5f;
+    private const float LimiterKnee = 0.8f; // soft-knee threshold
 
     private readonly List<ISendFeed> _feeds = [];
     private readonly HashSet<ISendFeed> _shortFeeds = [];
@@ -133,9 +134,15 @@ public sealed class SendMixer
                 Peak = magnitude;
             }
 
-            if (magnitude > 1f)
+            if (magnitude > LimiterKnee)
             {
-                destination[i] = Math.Clamp(value, -1f, 1f);
+                // soft knee: continuous and flat-saturating at 1.0, so an
+                // over-summing mix saturates gently instead of hard-clipping
+                // into sharp corners (P1.1 KOOK retest: hard limiter corners
+                // were themselves audible as crunch during loud speech+fx)
+                var overshoot = (magnitude - LimiterKnee) / (1f - LimiterKnee);
+                var limited = LimiterKnee + ((1f - LimiterKnee) * MathF.Tanh(overshoot));
+                destination[i] = MathF.Sign(value) * limited;
                 ClippedSamples++;
             }
         }

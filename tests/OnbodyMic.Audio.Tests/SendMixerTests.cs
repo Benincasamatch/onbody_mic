@@ -74,7 +74,7 @@ public sealed class SendMixerTests
     }
 
     [Fact]
-    public void Mix_is_hard_limited_and_clipping_counted()
+    public void Mix_is_soft_limited_and_clipping_counted()
     {
         var mic = new SourceChannel("mic", AudioKind.Microphone, 100);
         mic.SetTicket(new SourceTicket("mic", AudioKind.Microphone, Epoch, 1));
@@ -92,8 +92,10 @@ public sealed class SendMixerTests
         var output = new float[2];
         mixer.Read(output);
 
-        Assert.Equal(1f, output[0]);
-        Assert.Equal(-1f, output[1]);
+        // soft knee at 0.8: 1.8 maps to 0.8 + 0.2*tanh(5) ≈ 0.99998 —
+        // saturated but never hard-stopped, and no sharp corners
+        Assert.True(output[0] is > 0.99f and < 1f, $"positive: {output[0]}");
+        Assert.True(output[1] is < -0.99f and > -1f, $"negative: {output[1]}");
         Assert.Equal(2, mixer.ClippedSamples);
         Assert.Equal(1.8f, mixer.Peak, 5);
     }
@@ -156,7 +158,7 @@ public sealed class SendMixerTests
     {
         var mic = new SourceChannel("mic", AudioKind.Microphone, 100);
         mic.SetTicket(new SourceTicket("mic", AudioKind.Microphone, Epoch, 1));
-        mic.Push(new float[] { 1f, 1f, 1f });
+        mic.Push(new float[] { 0.5f, 0.5f, 0.5f }); // below the limiter knee
 
         var switches = SessionSwitches.AllOff with { MicSendEnabled = true };
         var mixer = Build(switches, clip: null);
@@ -165,16 +167,16 @@ public sealed class SendMixerTests
         // partial pull: tail must decay instead of hard-stepping to silence
         var output = new float[5];
         mixer.Read(output);
-        Assert.Equal(1f, output[0], 3);
-        Assert.Equal(1f / 3f, output[2], 3); // 3-sample fade-out tail
+        Assert.Equal(0.5f, output[0], 3);
+        Assert.Equal(0.5f / 3f, output[2], 3); // 3-sample fade-out tail
         Assert.Equal(0f, output[3]);
 
         // resume with a full pull: head ramps in from zero
-        mic.Push(new float[] { 1f, 1f, 1f, 1f, 1f });
+        mic.Push(new float[] { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f });
         mixer.Read(output);
         Assert.Equal(0f, output[0], 3);
-        Assert.Equal(0.2f, output[1], 3);
-        Assert.Equal(0.8f, output[4], 3);
+        Assert.Equal(0.1f, output[1], 3);
+        Assert.Equal(0.4f, output[4], 3);
     }
 
     [Fact]
