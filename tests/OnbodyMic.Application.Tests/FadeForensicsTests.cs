@@ -30,7 +30,7 @@ public sealed class FadeForensicsTests : IDisposable
             ClipDecoder = _decoder,
             SampleStore = _store,
             ClipResolver = id => new ClipResolution(true, true, $"assets/{id}.wav", 1f),
-            MicAdapterFactory = channel =>
+            MicAdapterFactory = (_, channel) =>
             {
                 _mic.Channel = channel;
                 return _mic;
@@ -40,8 +40,9 @@ public sealed class FadeForensicsTests : IDisposable
                 _app.Channel = channel;
                 return _app;
             },
-            OutputFactory = () => _output,
-            MonitorOutputFactory = () => _monitorOutput,
+            OutputFactory = _ => _output,
+            MonitorOutputFactory = _ => _monitorOutput,
+            InitialDevices = new PresetDeviceConfig("test-mic", "test-render", "test-cable", "test-monitor", null),
             SourcePrerollTimeoutMs = 20,
             AdaptiveRate = false,
             // DEFAULT fades: the smoke configuration under suspicion

@@ -120,12 +120,13 @@ internal static class P2Smoke
             ClipDecoder = decoder,
             SampleStore = cache,
             ClipResolver = Resolve,
-            MicAdapterFactory = channel => micId is null
+            MicAdapterFactory = (micDeviceId, channel) => micDeviceId == "unset"
                 ? throw new NotSupportedException("mic not configured for this smoke run")
-                : new WindowsMicSource(micId, channel),
+                : new WindowsMicSource(micDeviceId, channel),
             AppAdapterFactory = (channel, binding) => new WindowsAppSource(binding, channel),
-            OutputFactory = () => teed = new TeedExclusiveOutput(new WasapiExclusiveRenderPump(renderId)),
-            MonitorOutputFactory = () => new WindowsMonitorOutput(renderId),
+            OutputFactory = renderDeviceId => teed = new TeedExclusiveOutput(new WasapiExclusiveRenderPump(renderDeviceId)),
+            MonitorOutputFactory = monitorDeviceId => new WindowsMonitorOutput(monitorDeviceId),
+            InitialDevices = new PresetDeviceConfig(micId ?? "unset", renderId, null, renderId, null),
         });
         var attach = session.AttachOutput();
         Console.WriteLine(attach.Accepted ? "session: 输出已接入（发送/监听全部关闭）" : $"FAIL: attach {attach.Rejection}");

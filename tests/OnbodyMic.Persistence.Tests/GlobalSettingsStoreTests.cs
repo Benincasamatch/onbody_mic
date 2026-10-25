@@ -104,6 +104,29 @@ public sealed class GlobalSettingsStoreTests : IDisposable
         Assert.Empty(loaded.Issues);
     }
 
+
+    [Fact]
+    public void Preset_hotkeys_round_trip_and_conflict_with_clip_bindings()
+    {
+        var path = PathFor("settings.json");
+        var store = new GlobalSettingsStore(path);
+        var data = new GlobalSettingsData
+        {
+            PresetHotkeys = { ["preset-a"] = "Ctrl+Alt+P", ["preset-x"] = "Ctrl+Alt+O" },
+            ClipHotkeys = { ["clip-airhorn"] = "Ctrl+Alt+P", ["clip-b"] = "Ctrl+Alt+2" },
+        };
+        store.Save(data);
+
+        var loaded = store.Load();
+
+        // clip bindings validate first; the conflicting preset entry stays on disk but is not activated
+        Assert.Contains(loaded.Bindings, b => b.Action == HotkeyAction.PlayClip && b.TargetId == "clip-airhorn");
+        Assert.Contains(loaded.Bindings, b => b.Action == HotkeyAction.PlayClip && b.TargetId == "clip-b");
+        Assert.Contains(loaded.Bindings, b => b.Action == HotkeyAction.SelectPreset && b.TargetId == "preset-x");
+        Assert.DoesNotContain(loaded.Bindings, b => b.Action == HotkeyAction.SelectPreset && b.TargetId == "preset-a");
+        Assert.Contains(loaded.Issues, i => i.Section == "presetHotkeys" && i.Key == "preset-a");
+    }
+
     [Fact]
     public void Corrupt_json_throws_and_leaves_the_file_intact()
     {

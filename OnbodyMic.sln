@@ -29,6 +29,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OnbodyMic.Persistence.Tests
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OnbodyMic.Media.Tests", "tests\OnbodyMic.Media.Tests\OnbodyMic.Media.Tests.csproj", "{67346639-2748-488E-807E-DE1317871357}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OnbodyMic.Desktop", "src\OnbodyMic.Desktop\OnbodyMic.Desktop.csproj", "{90161723-B047-4D3A-BCEE-58BD5F7AAD96}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -183,6 +185,18 @@ Global
 		{67346639-2748-488E-807E-DE1317871357}.Release|x64.Build.0 = Release|Any CPU
 		{67346639-2748-488E-807E-DE1317871357}.Release|x86.ActiveCfg = Release|Any CPU
 		{67346639-2748-488E-807E-DE1317871357}.Release|x86.Build.0 = Release|Any CPU
+		{90161723-B047-4D3A-BCEE-58BD5F7AAD96}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{90161723-B047-4D3A-BCEE-58BD5F7AAD96}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{90161723-B047-4D3A-BCEE-58BD5F7AAD96}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{90161723-B047-4D3A-BCEE-58BD5F7AAD96}.Debug|x64.Build.0 = Debug|Any CPU
+		{90161723-B047-4D3A-BCEE-58BD5F7AAD96}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{90161723-B047-4D3A-BCEE-58BD5F7AAD96}.Debug|x86.Build.0 = Debug|Any CPU
+		{90161723-B047-4D3A-BCEE-58BD5F7AAD96}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{90161723-B047-4D3A-BCEE-58BD5F7AAD96}.Release|Any CPU.Build.0 = Release|Any CPU
+		{90161723-B047-4D3A-BCEE-58BD5F7AAD96}.Release|x64.ActiveCfg = Release|Any CPU
+		{90161723-B047-4D3A-BCEE-58BD5F7AAD96}.Release|x64.Build.0 = Release|Any CPU
+		{90161723-B047-4D3A-BCEE-58BD5F7AAD96}.Release|x86.ActiveCfg = Release|Any CPU
+		{90161723-B047-4D3A-BCEE-58BD5F7AAD96}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -196,5 +210,6 @@ Global
 		{A73821F4-17C5-418D-8646-7EB6378CFFB6} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{5EA9DD55-7231-4086-B030-90EE4D54A284} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{67346639-2748-488E-807E-DE1317871357} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
+		{90161723-B047-4D3A-BCEE-58BD5F7AAD96} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal

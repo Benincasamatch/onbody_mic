@@ -39,13 +39,22 @@ public sealed class HotkeyDispatcher : IDisposable
     private readonly AudioSession _session;
     private readonly IHotkeyService _service;
     private readonly Func<string, ClipResolution>? _clipResolver;
+    private readonly Func<string, bool>? _presetExists;
+    private readonly Func<string, PresetApplyResult>? _presetApplier;
     private volatile bool _suspended;
 
-    public HotkeyDispatcher(AudioSession session, IHotkeyService service, Func<string, ClipResolution>? clipResolver = null)
+    public HotkeyDispatcher(
+        AudioSession session,
+        IHotkeyService service,
+        Func<string, ClipResolution>? clipResolver = null,
+        Func<string, bool>? presetExists = null,
+        Func<string, PresetApplyResult>? presetApplier = null)
     {
         _session = session;
         _service = service;
         _clipResolver = clipResolver;
+        _presetExists = presetExists;
+        _presetApplier = presetApplier;
         _service.Triggered += OnTriggered;
     }
 
@@ -82,6 +91,18 @@ public sealed class HotkeyDispatcher : IDisposable
             if (!resolution.Available)
             {
                 return CommandResult.Reject($"clip-unavailable:{binding.TargetId}");
+            }
+        }
+        else if (binding.Action == HotkeyAction.SelectPreset)
+        {
+            if (string.IsNullOrWhiteSpace(binding.TargetId))
+            {
+                return CommandResult.Reject("preset-id-required");
+            }
+
+            if (_presetExists?.Invoke(binding.TargetId) == false)
+            {
+                return CommandResult.Reject($"unknown-preset:{binding.TargetId}");
             }
         }
         else if (binding.TargetId is not null)
@@ -130,8 +151,20 @@ public sealed class HotkeyDispatcher : IDisposable
                     var status = _session.Status();
                     Report(_session.SetMonitor(!status.Switches.MonitorEnabled, status.MonitorMode), "toggle-monitor");
                     break;
-                default:
-                    Notice($"unhandled hotkey action: {binding.Action}");
+                case HotkeyAction.SelectPreset:
+                    if (_presetApplier is null)
+                    {
+                        Notice("preset hotkeys unavailable: no preset manager wired");
+                        break;
+                    }
+
+                    if (_presetExists?.Invoke(binding.TargetId!) == false)
+                    {
+                        Notice($"hotkey preset missing: {binding.TargetId}");
+                        break;
+                    }
+
+                    Report(_presetApplier(binding.TargetId!), "select-preset");
                     break;
             }
         }
@@ -165,6 +198,14 @@ public sealed class HotkeyDispatcher : IDisposable
     }
 
     private void Report(CommandResult result, string action)
+    {
+        if (!result.Accepted)
+        {
+            Notice($"hotkey {action} rejected: {result.Rejection}");
+        }
+    }
+
+    private void Report(PresetApplyResult result, string action)
     {
         if (!result.Accepted)
         {

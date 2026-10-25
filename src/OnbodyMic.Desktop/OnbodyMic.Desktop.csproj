@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>OnbodyMic.Desktop</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OnbodyMic.Cli\OnbodyMic.Cli.csproj" />
+    <ProjectReference Include="..\OnbodyMic.Application\OnbodyMic.Application.csproj" />
+    <ProjectReference Include="..\OnbodyMic.Domain\OnbodyMic.Domain.csproj" />
+    <ProjectReference Include="..\OnbodyMic.Media\OnbodyMic.Media.csproj" />
+    <ProjectReference Include="..\OnbodyMic.Persistence\OnbodyMic.Persistence.csproj" />
+    <ProjectReference Include="..\OnbodyMic.Platform.Windows\OnbodyMic.Platform.Windows.csproj" />
+  </ItemGroup>
+</Project>

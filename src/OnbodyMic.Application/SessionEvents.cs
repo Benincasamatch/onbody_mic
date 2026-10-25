@@ -25,7 +25,8 @@ public sealed record SessionStatus(
     ActiveClip? Clip,
     bool MonitorSuspendedForPreview,
     MonitorMode MonitorMode,
-    RouteGains Gains);
+    RouteGains Gains,
+    PresetDeviceConfig? Devices);
 
 /// <summary>Desensitized counters for the metrics panel.</summary>
 public sealed record SessionMetrics(

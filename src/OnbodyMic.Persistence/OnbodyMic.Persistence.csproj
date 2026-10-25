@@ -3,6 +3,7 @@
     <RootNamespace>OnbodyMic.Persistence</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="..\OnbodyMic.Application\OnbodyMic.Application.csproj" />
     <ProjectReference Include="..\OnbodyMic.Domain\OnbodyMic.Domain.csproj" />
   </ItemGroup>
 </Project>

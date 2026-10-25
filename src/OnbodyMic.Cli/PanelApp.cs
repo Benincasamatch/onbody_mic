@@ -3,6 +3,7 @@ namespace OnbodyMic.Cli;
 using OnbodyMic.Application;
 using OnbodyMic.Audio;
 using OnbodyMic.Domain;
+using OnbodyMic.Persistence;
 using OnbodyMic.Platform.Windows;
 
 /// <summary>
@@ -16,12 +17,16 @@ internal static class PanelApp
     public static int Run(string[] args)
     {
         var options = ParseOptions(args);
+        var soundboard = Soundboard.Create(options.GetValueOrDefault("root"), Console.WriteLine);
         var devices = WindowsAudioDevices.List(activeOnly: true);
 
-        var micId = ResolveEndpoint(options, "mic-id", "mic", devices, capture: true, "麦克风（真实输入）");
-        var renderId = ResolveEndpoint(options, "render-id", "render", devices, capture: false, "虚拟输出（线缆 Render，独占写入）");
-        var cableId = ResolveEndpoint(options, "capture-id", "capture", devices, capture: true, "虚拟麦（线缆 Capture，FullEndpoint 监听用）");
-        var monitorId = ResolveEndpoint(options, "monitor-id", "monitor", devices, capture: false, "监听输出（耳机）");
+        // device sources, in priority order: explicit args, then the stored
+        // last preset (config-only restore), then interactive prompts
+        var lastPreset = LoadLastPresetDevices(soundboard);
+        var micId = ResolveEndpoint(options, "mic-id", "mic", devices, capture: true, "麦克风（真实输入）", lastPreset?.MicDeviceId);
+        var renderId = ResolveEndpoint(options, "render-id", "render", devices, capture: false, "虚拟输出（线缆 Render，独占写入）", lastPreset?.VirtualRenderDeviceId);
+        var cableId = ResolveEndpoint(options, "capture-id", "capture", devices, capture: true, "虚拟麦（线缆 Capture，FullEndpoint 监听用）", lastPreset?.VirtualCaptureDeviceId);
+        var monitorId = ResolveEndpoint(options, "monitor-id", "monitor", devices, capture: false, "监听输出（耳机）", lastPreset?.MonitorDeviceId);
         if (micId is null || renderId is null || cableId is null || monitorId is null)
         {
             return 1;
@@ -37,19 +42,21 @@ internal static class PanelApp
             pid = 0;
         }
 
-        var soundboard = Soundboard.Create(options.GetValueOrDefault("root"), Console.WriteLine);
         using var session = new AudioSession(new AudioSessionOptions
         {
             ClipDecoder = new NAudioClipDecoder(),
             SampleStore = soundboard.Cache,
             ClipResolver = soundboard.Resolve,
-            MicAdapterFactory = channel => new WindowsMicSource(micId, channel),
+            MicAdapterFactory = (micDeviceId, channel) => new WindowsMicSource(micDeviceId, channel),
             AppAdapterFactory = (channel, binding) => new WindowsAppSource(binding, channel),
-            OutputFactory = () => new WasapiExclusiveRenderPump(renderId),
-            MonitorOutputFactory = () => new WindowsMonitorOutput(monitorId),
-            MonitorCaptureFactory = _ => new WindowsMonitorCapture(cableId),
+            OutputFactory = renderDeviceId => new WasapiExclusiveRenderPump(renderDeviceId),
+            MonitorOutputFactory = monitorDeviceId => new WindowsMonitorOutput(monitorDeviceId),
+            MonitorCaptureFactory = (cableDeviceId, _) => new WindowsMonitorCapture(cableDeviceId),
+            InitialDevices = new PresetDeviceConfig(micId, renderId, cableId, monitorId, null),
         });
         session.Noticed += notice => Console.WriteLine($"[notice] {notice.Kind}: {notice.Message}");
+
+        var presets = new PanelPresets(session, soundboard, devices);
 
         var attach = session.AttachOutput();
         Console.WriteLine(attach.Accepted
@@ -66,10 +73,12 @@ internal static class PanelApp
             Console.WriteLine(bound.Accepted ? $"已绑定应用 pid={pid}" : $"绑定失败: {bound.Rejection}");
         }
 
-        soundboard.Attach(session);
+        soundboard.Attach(session, presets.Manager.Exists, presets.Manager.Apply);
+        presets.RestoreStartupOrGuide();
 
-        Console.WriteLine("命令: help status metrics | mic/extras/app on|off | bind app <pid> | play/preview <库ID或文件> | stop");
+        Console.WriteLine("命令: help status metrics | mic/extras/app on|off | bind app <pid|auto> | play/preview <库ID或文件> | stop");
         Console.WriteLine("      import/clips/fav/rename/clipgain/group/del | hotkeys, hotkey bind/unbind | cache | monitor clip|full|off");
+        Console.WriteLine("      presets, preset new/save/copy/rename/del/apply/restore | gain mic|app|clip|monitor <v> | mute | unmute | auto on|off | quit");
         Console.WriteLine("      gain mic|app|clip|monitor <v> | mute | unmute | auto on|off | quit");
         using var metrics = new MetricsPrinter(session);
         while (true)
@@ -93,7 +102,7 @@ internal static class PanelApp
                 break;
             }
 
-            if (!soundboard.Handle(command, parts) && !Handle(session, command, parts, metrics))
+            if (!soundboard.Handle(command, parts) && !presets.Handle(command, parts) && !Handle(session, command, parts, metrics))
             {
                 Console.WriteLine("未知命令，输入 help 查看帮助");
             }
@@ -108,12 +117,12 @@ internal static class PanelApp
         switch (command)
         {
             case "help":
-                Console.WriteLine("mic|extras|app on|off, bind app <pid>, play|preview <库ID或文件路径>, stop,");
-                Console.WriteLine("monitor clip|full|off, gain mic|app|clip|monitor <v>, mute, unmute,");
-                Console.WriteLine("status, metrics, auto on|off");
+                Console.WriteLine("mic|extras|app on|off, bind app <pid|auto>, play|preview <库ID或文件路径>, stop,");
+                Console.WriteLine("monitor clip|full|off, gain mic|app|clip|monitor <v>, mute, unmute, status, metrics, auto on|off");
                 Console.WriteLine("import <文件> [--name 名] [--dup], clips [过滤] [--fav] [--group 组] [--sort name|time], search <词>");
-                Console.WriteLine("fav|unfav <clipId>, rename <clipId> <名>, clipgain <clipId> <0..4>, del <clipId>");
+                Console.WriteLine("fav|unfav <clipId>, rename <clipId> <名>, clipgain <clipId> <0..4>, del <clipId> [--force]");
                 Console.WriteLine("group add|rename|del|set ..., hotkeys, hotkey bind|unbind ..., cache [prefill], quit");
+                Console.WriteLine("presets, preset new|save|copy|rename|del|apply|restore");
                 return true;
             case "status":
                 PrintStatus(session);
@@ -140,16 +149,6 @@ internal static class PanelApp
                     _ => session.EnableApp(on),
                 };
                 Console.WriteLine(result.Accepted ? "ok" : $"拒绝: {result.Rejection}");
-                return true;
-            case "bind":
-                if (parts.Length == 3 && parts[1] == "app" && uint.TryParse(parts[2], out var pid))
-                {
-                    var bound = session.BindApplication(new AppBinding(pid, $"pid {pid}"));
-                    Console.WriteLine(bound.Accepted ? "ok" : $"拒绝: {bound.Rejection}");
-                    return true;
-                }
-
-                Console.WriteLine("用法: bind app <pid>");
                 return true;
             case "play":
             case "preview":
@@ -257,12 +256,21 @@ internal static class PanelApp
         string indexKey,
         IReadOnlyList<AudioEndpointInfo> devices,
         bool capture,
-        string role)
+        string role,
+        string? presetDefault = null)
     {
         if (options.TryGetValue(idKey, out var id))
         {
             return devices.Any(d => d.Id == id) ? id : null;
         }
+
+        // the stored preset's endpoint counts as chosen: config-only restore
+        // must not demand interactive re-selection (T24)
+        if (presetDefault is not null)
+        {
+            return presetDefault;
+        }
+
 
         var flow = capture ? "Capture" : "Render";
         var candidates = devices.Where(d => d.DataFlow == flow).ToList();
@@ -287,6 +295,19 @@ internal static class PanelApp
         }
 
         return candidates[chosen].Id;
+    }
+
+    /// <summary>Last successfully applied preset's devices, when present and loadable; null otherwise.</summary>
+    internal static PresetDeviceConfig? LoadLastPresetDevices(Soundboard soundboard)
+    {
+        var lastId = soundboard.Settings.Data.LastPresetId;
+        if (lastId is null)
+        {
+            return null;
+        }
+
+        var load = new JsonPresetStore(Path.Combine(soundboard.Root, "presets")).Load(lastId);
+        return load.Status == PresetLoadStatus.Loaded ? load.Config!.Devices : null;
     }
 
     internal static Dictionary<string, string> ParseOptions(string[] args)

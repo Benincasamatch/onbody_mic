@@ -137,7 +137,10 @@ devlog/
   },
   "clipLayout": ["clip-airhorn"],
   "libraryView": { "favoritesOnly": false, "groupId": null },
-  "virtualOutput": { "deviceStableId": "device-virtual-out-1" },
+  "virtualOutput": {
+    "deviceStableId": "device-virtual-out-1",
+    "captureDeviceStableId": "device-virtual-capture-1"
+  },
   "monitor": {
     "mode": "ClipOnly",
     "deviceStableId": "device-headphones-1",
@@ -146,6 +149,8 @@ devlog/
 }
 ```
 
+
+P3 实现补充（2026-10-26，工程登记）：`virtualOutput.captureDeviceStableId` 为新增字段——线缆 capture 侧端点是 FullEndpoint 监听的读取源，与 render 侧端点无派生关系，须显式保存；`monitor.deviceStableId` 为监听输出（耳机）。实现字段名与本节一致，由 `presets/<presetId>.json` 一文件一预设承载，presetId 限 ASCII `[A-Za-z0-9_-]`（作为文件名）。
 路径、ID、示例增益和热键均为示意，不是实际设备或性能结果。全局控制绑定、每条音效播放绑定与选择预设绑定均在全局设置；`emergencyMute` 尤其不随预设改变。映射可包含多条，示例一条不限制素材数量；`clipLayout` 控制布局而非授权白名单。所有绑定默认 `null`/空，未经用户设置不得注册。有效配置只保存选择和偏好，运行时 PID、句柄、活动开关不落盘。`gain` 只是候选格式，数值约束需 P0 冻结。
 
 ### 4.3 音效库索引示意

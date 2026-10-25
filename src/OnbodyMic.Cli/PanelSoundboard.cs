@@ -17,25 +17,34 @@ internal sealed class Soundboard : IDisposable
     private readonly GlobalSettingsStore _settingsStore;
     private readonly NAudioClipDecoder _decoder = new();
     private readonly Action<string> _print;
+    private readonly string _root;
 
     private GlobalSettings _settings;
     private WindowsHotkeyService? _hotkeys;
     private HotkeyDispatcher? _dispatcher;
     private Task? _prefill;
+    private Func<string, IReadOnlyList<string>>? _presetClipReferences;
     private bool _disposed;
 
-    private Soundboard(GlobalSettingsStore settingsStore, GlobalSettings settings, ClipLibrary? library, ClipCache cache, Action<string> print)
+    private Soundboard(GlobalSettingsStore settingsStore, GlobalSettings settings, ClipLibrary? library, ClipCache cache, Action<string> print, string root)
     {
         _settingsStore = settingsStore;
         _settings = settings;
         Library = library;
         Cache = cache;
         _print = print;
+        _root = root;
     }
 
     public ClipLibrary? Library { get; }
 
     public ClipCache Cache { get; }
+
+    public string Root => _root;
+
+    public GlobalSettings Settings => _settings;
+
+    public void SaveSettingsPublic() => SaveSettings();
 
     /// <summary>Creates settings + library + cache (phase 1, before the session exists).</summary>
     public static Soundboard Create(string? rootOverride, Action<string> print)
@@ -72,14 +81,17 @@ internal sealed class Soundboard : IDisposable
             print($"[library] 音效库索引损坏，本次禁用音效库（文件未改动）: {ex.Message}");
         }
 
-        return new Soundboard(settingsStore, settings, library, new ClipCache(ClipCache.DefaultCapacityFrames), print);
+        return new Soundboard(settingsStore, settings, library, new ClipCache(ClipCache.DefaultCapacityFrames), print, root);
     }
 
     /// <summary>Wires the hotkey backend and restores persisted bindings (phase 2, after the session exists).</summary>
-    public void Attach(AudioSession session)
+    public void Attach(
+        AudioSession session,
+        Func<string, bool>? presetExists = null,
+        Func<string, PresetApplyResult>? presetApplier = null)
     {
         _hotkeys = new WindowsHotkeyService();
-        _dispatcher = new HotkeyDispatcher(session, _hotkeys, Resolve);
+        _dispatcher = new HotkeyDispatcher(session, _hotkeys, Resolve, presetExists, presetApplier);
         _dispatcher.Noticed += notice => _print($"[hotkey] {notice.Message}");
 
         foreach (var binding in _settings.Bindings)
@@ -91,6 +103,41 @@ internal sealed class Soundboard : IDisposable
         }
 
         StartPrefill();
+    }
+
+    /// <summary>Lets preset delete warn about clip references held by stored presets (docs/01 §5.3).</summary>
+    public void SetPresetClipReferenceLookup(Func<string, IReadOnlyList<string>> lookup) => _presetClipReferences = lookup;
+
+    public ILastPresetSink CreateLastPresetSink() => new SettingsLastPresetSink(this);
+
+    /// <summary>Deletes a library clip: removes its hotkey binding and cache entry; only the managed copy dies (docs/01 §5.3).</summary>
+    public bool DeleteClip(string clipId)
+    {
+        if (Library is null || Library.Find(clipId) is null)
+        {
+            return false;
+        }
+
+        if (_settings.Data.ClipHotkeys.TryGetValue(clipId, out var gesture) && !string.IsNullOrWhiteSpace(gesture))
+        {
+            RemoveClipHotkey(clipId);
+        }
+
+        var deleted = Library.Delete(clipId);
+        Cache.Remove(clipId);
+        return deleted;
+    }
+
+    public IReadOnlyList<HotkeyBinding> ActiveHotkeys => _dispatcher?.Active ?? [];
+
+    public void RemovePresetHotkey(string presetId)
+    {
+        if (_settings.Data.PresetHotkeys.Remove(presetId))
+        {
+            SaveSettings();
+        }
+
+        _dispatcher?.Unbind(HotkeyAction.SelectPreset, presetId);
     }
 
     public ClipResolution Resolve(string clipId)
@@ -352,9 +399,9 @@ internal sealed class Soundboard : IDisposable
             return;
         }
 
-        if (parts.Length != 2)
+        if (parts.Length != 2 && !(parts.Length == 3 && parts[2] == "--force"))
         {
-            Console.WriteLine("用法: del <clipId>");
+            Console.WriteLine("用法: del <clipId> [--force]");
             return;
         }
 
@@ -362,6 +409,13 @@ internal sealed class Soundboard : IDisposable
         if (Library.Find(clipId) is null)
         {
             Console.WriteLine("未知音效");
+            return;
+        }
+
+        var referencing = _presetClipReferences?.Invoke(clipId) ?? [];
+        if (referencing.Count > 0 && !parts.Contains("--force"))
+        {
+            Console.WriteLine($"以下预设的布局引用了该音效: {string.Join(", ", referencing)}；仍要删除请用 del {clipId} --force（预设引用将悬空标红）");
             return;
         }
 
@@ -389,14 +443,20 @@ internal sealed class Soundboard : IDisposable
             return;
         }
 
-        // hotkey bind <action> <gesture> | hotkey bind clip <clipId> <gesture>
-        string? clipId = null;
+        // hotkey bind <action> <gesture> | hotkey bind clip <clipId> <gesture> | hotkey bind preset <presetId> <gesture>
+        string? targetId = null;
         string actionName;
         string gestureText;
         if (parts.Length == 5 && parts[2] == "clip")
         {
-            clipId = parts[3];
+            targetId = parts[3];
             actionName = "clip";
+            gestureText = parts[4];
+        }
+        else if (parts.Length == 5 && parts[2] == "preset")
+        {
+            targetId = parts[3];
+            actionName = "preset";
             gestureText = parts[4];
         }
         else if (parts.Length == 4)
@@ -407,7 +467,7 @@ internal sealed class Soundboard : IDisposable
         else
         {
             Console.WriteLine("用法: hotkey bind stop|extras|mic|mute|monitor <手势> | hotkey bind clip <clipId> <手势>");
-            Console.WriteLine("      手势如 Ctrl+Alt+F7；解除: hotkey unbind 同上");
+            Console.WriteLine("      hotkey bind preset <presetId> <手势>；手势如 Ctrl+Alt+F7；解除: hotkey unbind 同上");
             return;
         }
 
@@ -425,6 +485,7 @@ internal sealed class Soundboard : IDisposable
             "mute" => HotkeyAction.EmergencyMute,
             "monitor" => HotkeyAction.ToggleMonitor,
             "clip" => HotkeyAction.PlayClip,
+            "preset" => HotkeyAction.SelectPreset,
             _ => (HotkeyAction?)null,
         };
         if (action is null)
@@ -433,7 +494,7 @@ internal sealed class Soundboard : IDisposable
             return;
         }
 
-        var binding = new HotkeyBinding(action.Value, clipId, gesture);
+        var binding = new HotkeyBinding(action.Value, targetId, gesture);
         var result = _dispatcher.Bind(binding);
         Console.WriteLine(result.Accepted ? $"已绑定 {binding.Describe()} = {gesture}" : $"绑定失败: {result.Rejection}");
         if (!result.Accepted)
@@ -451,13 +512,18 @@ internal sealed class Soundboard : IDisposable
 
     private void HandleHotkeyUnbind(string[] parts)
     {
-        // hotkey unbind <action> | hotkey unbind clip <clipId>
-        string? clipId = null;
+        // hotkey unbind <action> | hotkey unbind clip <clipId> | hotkey unbind preset <presetId>
+        string? targetId = null;
         string actionName;
         if (parts.Length == 4 && parts[2] == "clip")
         {
-            clipId = parts[3];
+            targetId = parts[3];
             actionName = "clip";
+        }
+        else if (parts.Length == 4 && parts[2] == "preset")
+        {
+            targetId = parts[3];
+            actionName = "preset";
         }
         else if (parts.Length == 3)
         {
@@ -465,7 +531,7 @@ internal sealed class Soundboard : IDisposable
         }
         else
         {
-            Console.WriteLine("用法: hotkey unbind stop|extras|mic|mute|monitor|clip <clipId>");
+            Console.WriteLine("用法: hotkey unbind stop|extras|mic|mute|monitor|clip <clipId>|preset <presetId>");
             return;
         }
 
@@ -477,6 +543,7 @@ internal sealed class Soundboard : IDisposable
             "mute" => HotkeyAction.EmergencyMute,
             "monitor" => HotkeyAction.ToggleMonitor,
             "clip" => HotkeyAction.PlayClip,
+            "preset" => HotkeyAction.SelectPreset,
             _ => (HotkeyAction?)null,
         };
         if (action is null || _dispatcher is null)
@@ -485,12 +552,16 @@ internal sealed class Soundboard : IDisposable
             return;
         }
 
-        Console.WriteLine(_dispatcher.Unbind(action.Value, clipId).Accepted ? "已解除" : "失败");
-        if (clipId is not null)
+        Console.WriteLine(_dispatcher.Unbind(action.Value, targetId).Accepted ? "已解除" : "失败");
+        if (targetId is not null && action == HotkeyAction.PlayClip)
         {
-            RemoveClipHotkey(clipId);
+            RemoveClipHotkey(targetId);
         }
-        else if (actionName is not null)
+        else if (targetId is not null && action == HotkeyAction.SelectPreset)
+        {
+            RemovePresetHotkey(targetId);
+        }
+        else
         {
             var storageName = StorageNameFor(action.Value);
             if (storageName is not null && _settings.Data.GlobalHotkeys.Remove(storageName))
@@ -554,6 +625,10 @@ internal sealed class Soundboard : IDisposable
         if (binding.Action == HotkeyAction.PlayClip && binding.TargetId is not null)
         {
             _settings.Data.ClipHotkeys[binding.TargetId] = binding.Gesture.ToString();
+        }
+        else if (binding.Action == HotkeyAction.SelectPreset && binding.TargetId is not null)
+        {
+            _settings.Data.PresetHotkeys[binding.TargetId] = binding.Gesture.ToString();
         }
         else
         {
@@ -640,5 +715,17 @@ internal sealed class Soundboard : IDisposable
         _dispatcher?.Dispose();
         _hotkeys?.Dispose();
         (Library as IDisposable)?.Dispose();
+    }
+}
+
+/// <summary>lastPresetId persistence over settings.json; only successful applies write it (PresetManager contract).</summary>
+internal sealed class SettingsLastPresetSink(Soundboard soundboard) : ILastPresetSink
+{
+    public string? LastPresetId => soundboard.Settings.Data.LastPresetId;
+
+    public void SetLastPreset(string? presetId)
+    {
+        soundboard.Settings.Data.LastPresetId = presetId;
+        soundboard.SaveSettingsPublic();
     }
 }

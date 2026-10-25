@@ -281,6 +281,21 @@ public sealed class SessionEngine
         return CommandResult.Ok;
     }
 
+    /// <summary>
+    /// Full session teardown without committing a new preset id (B06: a
+    /// failed switch keeps the old selection but stays muted). Latching and
+    /// output-lost flags survive.
+    /// </summary>
+    public CommandResult AbortSession()
+    {
+        Switches = SessionSwitches.AllOff;
+        ClearClip();
+        InvalidateAllSources();
+        SessionEpoch++;
+        DevicesValidated = false;
+        return CommandResult.Ok;
+    }
+
     public CommandResult SwitchPreset(string presetId)
     {
         if (string.IsNullOrWhiteSpace(presetId))
@@ -290,12 +305,22 @@ public sealed class SessionEngine
 
         // Full teardown happens first; the id is only committed when the new
         // preset validates, so a failure leaves the old config but muted.
-        Switches = SessionSwitches.AllOff;
-        ClearClip();
-        InvalidateAllSources();
-        SessionEpoch++;
-        DevicesValidated = false;
+        AbortSession();
         LastPresetId = presetId;
+        return CommandResult.Ok;
+    }
+
+    /// <summary>
+    /// Stores the monitor mode preference with monitoring forced off. It only
+    /// ever disables, so it stays legal while emergency-latched (docs/06 §5.3.4).
+    /// </summary>
+    public CommandResult ConfigureMonitorPreference(MonitorMode mode)
+    {
+        MonitorMode = mode;
+        Switches = Switches with { MonitorEnabled = false };
+        MonitorEpoch++;
+        MonitorSuspendedForPreview = false;
+        _monitorResumeEligible = false;
         return CommandResult.Ok;
     }
 

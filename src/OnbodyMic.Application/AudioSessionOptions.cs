@@ -1,3 +1,5 @@
+using OnbodyMic.Domain;
+
 namespace OnbodyMic.Application;
 
 /// <summary>
@@ -18,20 +20,26 @@ public sealed class AudioSessionOptions
     /// <summary>Boundary ramp for clip start/stop/replace/natural end; 0 disables (exact-value tests).</summary>
     public int ClipBoundaryFadeFrames { get; init; } = ClipPlayer.DefaultFadeFrames;
 
-    /// <summary>Creates the microphone adapter bound to the mic channel.</summary>
-    public required Func<SourceChannel, IAudioSourceAdapter> MicAdapterFactory { get; init; }
+    /// <summary>Initial device endpoints; presets replace this at apply time. Null leaves the session unconfigured.</summary>
+    public PresetDeviceConfig? InitialDevices { get; init; }
+
+    /// <summary>Checks configured endpoints against live hardware; missing devices become route issues, never substitutions (B05).</summary>
+    public Func<PresetDeviceConfig, IReadOnlyList<RouteIssue>>? DeviceValidator { get; init; }
+
+    /// <summary>Creates the microphone adapter for the given endpoint id bound to the mic channel.</summary>
+    public required Func<string, SourceChannel, IAudioSourceAdapter> MicAdapterFactory { get; init; }
 
     /// <summary>Creates the application capture adapter; the binding is the verified process identity.</summary>
     public required Func<SourceChannel, AppBinding, IAudioSourceAdapter> AppAdapterFactory { get; init; }
 
-    /// <summary>Creates the virtual output pump (exclusive writer of the cable render endpoint).</summary>
-    public required Func<IVirtualAudioOutput> OutputFactory { get; init; }
+    /// <summary>Creates the virtual output pump for the given render endpoint id (exclusive writer of the cable).</summary>
+    public required Func<string, IVirtualAudioOutput> OutputFactory { get; init; }
 
-    /// <summary>Creates the local monitor output device.</summary>
-    public required Func<IMonitorOutput> MonitorOutputFactory { get; init; }
+    /// <summary>Creates the local monitor output device for the given endpoint id.</summary>
+    public required Func<string, IMonitorOutput> MonitorOutputFactory { get; init; }
 
-    /// <summary>Creates the FullEndpoint capture adapter; null when the capability is unavailable.</summary>
-    public Func<MonitorRouter, IMonitorCaptureAdapter>? MonitorCaptureFactory { get; init; }
+    /// <summary>Creates the FullEndpoint capture adapter for the given cable capture endpoint id; null when unavailable.</summary>
+    public Func<string, MonitorRouter, IMonitorCaptureAdapter>? MonitorCaptureFactory { get; init; }
 
     public RouteGains InitialGains { get; init; } = RouteGains.Unity;
 

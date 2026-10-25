@@ -4,9 +4,17 @@ using NAudio.CoreAudioApi;
 
 public static class WindowsAudioDevices
 {
+    private static MMDeviceEnumerator? _enumerator;
+
+    /// <summary>
+    /// One process-wide NAudio enumerator, created before any pump activates
+    /// the coclass through raw interop: a second wrapper type for the same
+    /// COM singleton fails its coclass cast (P1 constraint, devlog 2026-10-26).
+    /// </summary>
+    private static MMDeviceEnumerator Enumerator => _enumerator ??= new MMDeviceEnumerator();
+
     public static IReadOnlyList<AudioEndpointInfo> List(bool activeOnly = true)
     {
-        using var enumerator = new MMDeviceEnumerator();
         var states = DeviceState.Active | DeviceState.Disabled | DeviceState.NotPresent | DeviceState.Unplugged;
 
         var result = new List<AudioEndpointInfo>();
@@ -17,7 +25,7 @@ public static class WindowsAudioDevices
                 continue;
             }
 
-            foreach (var device in enumerator.EnumerateAudioEndPoints(flow, states))
+            foreach (var device in Enumerator.EnumerateAudioEndPoints(flow, states))
             {
                 using var _ = device;
                 if (activeOnly && device.State != DeviceState.Active)
@@ -38,10 +46,9 @@ public static class WindowsAudioDevices
 
     public static string? DefaultDeviceId(bool capture)
     {
-        using var enumerator = new MMDeviceEnumerator();
         try
         {
-            using var device = enumerator.GetDefaultAudioEndpoint(
+            using var device = Enumerator.GetDefaultAudioEndpoint(
                 capture ? DataFlow.Capture : DataFlow.Render, Role.Multimedia);
             return device?.ID;
         }
@@ -51,17 +58,15 @@ public static class WindowsAudioDevices
         }
     }
 
-    public static MMDevice OpenById(string id)
+    public static MMDevice? OpenById(string id)
     {
-        var enumerator = new MMDeviceEnumerator();
         try
         {
-            return enumerator.GetDevice(id);
+            return Enumerator.GetDevice(id);
         }
         catch
         {
-            enumerator.Dispose();
-            throw;
+            return null;
         }
     }
 

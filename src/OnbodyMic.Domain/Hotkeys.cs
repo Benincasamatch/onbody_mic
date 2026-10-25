@@ -1,9 +1,10 @@
 namespace OnbodyMic.Domain;
 
 /// <summary>
-/// Global hotkey actions (docs/01 §5.8 first-release set). Preset selection
-/// joins when presets exist (P3); no preview hotkey — auditions are explicit
-/// local actions, never a send-hotkey fallback.
+/// Global hotkey actions (docs/01 §5.8 first-release set). SelectPreset
+/// applies a stored preset through the same safe switch flow as the UI;
+/// no preview hotkey — auditions are explicit local actions, never a
+/// send-hotkey fallback.
 /// </summary>
 public enum HotkeyAction
 {
@@ -13,6 +14,7 @@ public enum HotkeyAction
     ToggleMicSend = 3,
     EmergencyMute = 4,
     ToggleMonitor = 5,
+    SelectPreset = 6,
 }
 
 public static class HotkeyActionNames
@@ -26,6 +28,7 @@ public static class HotkeyActionNames
         HotkeyAction.ToggleMicSend => "toggleMicSend",
         HotkeyAction.EmergencyMute => "emergencyMute",
         HotkeyAction.ToggleMonitor => "toggleMonitor",
+        HotkeyAction.SelectPreset => "selectPreset",
         _ => throw new ArgumentOutOfRangeException(nameof(action)),
     };
 
@@ -39,6 +42,7 @@ public static class HotkeyActionNames
             case "toggleMicSend": action = HotkeyAction.ToggleMicSend; return true;
             case "emergencyMute": action = HotkeyAction.EmergencyMute; return true;
             case "toggleMonitor": action = HotkeyAction.ToggleMonitor; return true;
+            case "selectPreset": action = HotkeyAction.SelectPreset; return true;
             default: action = default; return false;
         }
     }
@@ -243,6 +247,7 @@ public sealed record HotkeyBinding(HotkeyAction Action, string? TargetId, Hotkey
         HotkeyAction.ToggleMicSend => "toggle-mic-send",
         HotkeyAction.EmergencyMute => "emergency-mute",
         HotkeyAction.ToggleMonitor => "toggle-monitor",
+        HotkeyAction.SelectPreset => $"select-preset:{TargetId}",
         _ => Action.ToString(),
     };
 }

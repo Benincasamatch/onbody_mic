@@ -14,6 +14,9 @@ public sealed class UiPreferencesData
 {
     public bool StartMinimized { get; set; }
 
+    /// <summary>True once the user has seen the close-to-tray explanation (docs/01 §6 tray baseline).</summary>
+    public bool CloseToTrayAcknowledged { get; set; }
+
     /// <summary>"name" | "importTime"; anything else loads as the default with an issue.</summary>
     public string ClipSort { get; set; } = "name";
 }
@@ -123,12 +126,17 @@ public sealed class GlobalSettingsStore
             AddBinding(bindings, seenGestures, issues, "clipHotkeys", clipId, HotkeyAction.PlayClip, clipId, gestureText);
         }
 
-        foreach (var (presetId, _) in data.PresetHotkeys)
+        foreach (var (presetId, gestureText) in data.PresetHotkeys)
         {
+            // a dangling preset id is kept and reported like clip bindings:
+            // visible, red, decided by the user (docs/01 §5.8)
             if (string.IsNullOrWhiteSpace(presetId))
             {
                 issues.Add(new SettingsIssue("presetHotkeys", presetId, "empty preset id"));
+                continue;
             }
+
+            AddBinding(bindings, seenGestures, issues, "presetHotkeys", presetId, HotkeyAction.SelectPreset, presetId, gestureText);
         }
 
         if (data.Ui.ClipSort is not ("name" or "importTime"))

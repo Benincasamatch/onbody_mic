@@ -34,7 +34,7 @@ public sealed class HotkeyDispatcherTests : IDisposable
             ClipBoundaryFadeFrames = 0, // exact-value assertions
             SampleStore = _store,
             ClipResolver = id => _resolutions.TryGetValue(id, out var resolution) ? resolution : ClipResolution.Unknown,
-            MicAdapterFactory = channel =>
+            MicAdapterFactory = (_, channel) =>
             {
                 _mic.Channel = channel;
                 return _mic;
@@ -44,8 +44,9 @@ public sealed class HotkeyDispatcherTests : IDisposable
                 _app.Channel = channel;
                 return _app;
             },
-            OutputFactory = _output.Create,
-            MonitorOutputFactory = _monitorOutput.Create,
+            OutputFactory = _ => _output.Create(),
+            MonitorOutputFactory = _ => _monitorOutput.Create(),
+            InitialDevices = new PresetDeviceConfig("test-mic", "test-render", "test-cable", "test-monitor", null),
             SourcePrerollTimeoutMs = 20,
             AdaptiveRate = false,
         });

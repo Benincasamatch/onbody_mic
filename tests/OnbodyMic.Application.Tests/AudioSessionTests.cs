@@ -181,14 +181,15 @@ public sealed class AudioSessionTests
         using var session = new AudioSession(new AudioSessionOptions
         {
             ClipDecoder = new FakeDecoder(),
-            MicAdapterFactory = channel =>
+            MicAdapterFactory = (_, channel) =>
             {
                 mic.Channel = channel;
                 return mic;
             },
             AppAdapterFactory = (_, _) => throw new InvalidOperationException("unused"),
-            OutputFactory = output.Create,
-            MonitorOutputFactory = () => throw new InvalidOperationException("unused"),
+            OutputFactory = _ => output.Create(),
+            MonitorOutputFactory = _ => throw new InvalidOperationException("unused"),
+            InitialDevices = new PresetDeviceConfig("test-mic", "test-render", "test-cable", "test-monitor", null),
             AdaptiveRate = true,
             SourcePrerollTimeoutMs = 20,
         });
@@ -514,7 +515,7 @@ public sealed class AudioSessionTests
             {
                 ClipDecoder = decoder,
                 ClipBoundaryFadeFrames = 0, // exact-value assertions; fades covered in ClipPlayerTests
-                MicAdapterFactory = channel =>
+                MicAdapterFactory = (_, channel) =>
                 {
                     mic.Channel = channel;
                     return mic;
@@ -524,14 +525,19 @@ public sealed class AudioSessionTests
                     app.Channel = channel;
                     return app;
                 },
-                OutputFactory = output.Create,
-                MonitorOutputFactory = monitorOutput.Create,
-                MonitorCaptureFactory = router => monitorCapture.Create(),
+                OutputFactory = _ => output.Create(),
+                MonitorOutputFactory = _ => monitorOutput.Create(),
+                MonitorCaptureFactory = (_, _) => monitorCapture.Create(),
+                InitialDevices = SessionEnvDevices(),
                 SourcePrerollTimeoutMs = 20,
                 AdaptiveRate = false,
             });
             return new SessionEnv(session, decoder, mic, app, output, monitorOutput, monitorCapture);
         }
+
+        public static PresetDeviceConfig SessionEnvDevices() => new(
+            "test-mic", "test-render", "test-cable", "test-monitor", null);
+
 
         public void Dispose() => Session.Dispose();
     }

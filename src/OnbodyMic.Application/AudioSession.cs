@@ -26,6 +26,7 @@ public sealed class AudioSession : IDisposable
     private IMonitorCaptureAdapter? _monitorCapture;
     private AppBinding? _appBinding;
     private RouteGains _gains;
+    private PresetDeviceConfig? _devices;
     private volatile SessionRuntimeState _runtime;
     private volatile bool _disposed;
 
@@ -36,6 +37,7 @@ public sealed class AudioSession : IDisposable
     {
         _options = options;
         _gains = options.InitialGains;
+        _devices = options.InitialDevices;
         _decoder = options.ClipDecoder;
         _commands = new SessionCommandQueue();
         _micChannel = new SourceChannel("mic", AudioKind.Microphone, options.MicQueueFrames);
@@ -79,15 +81,18 @@ public sealed class AudioSession : IDisposable
 
     // ---- public command surface (serialized; safe from any thread) ----
 
-    /// <summary>Attaches (or re-attaches after a fault) the virtual output and validates devices.</summary>
+    /// <summary>Attaches (or re-attaches after a fault) the virtual output for the configured render endpoint.</summary>
     public CommandResult AttachOutput() => _commands.Submit("attach-output", () =>
     {
+        if (_devices is null)
+        {
+            return CommandResult.Reject("no-device-config");
+        }
+
         _output = SafeDispose(_output);
         try
         {
-            _output = _options.OutputFactory();
-            _output.Faulted += ex => _commands.Post("output-faulted", () => HandleOutputFaulted(ex), urgent: true);
-            _output.Start(MixPull);
+            StartOutput();
             _ = Engine.ValidateDevices();
             PublishState();
             return CommandResult.Ok;
@@ -99,6 +104,74 @@ public sealed class AudioSession : IDisposable
             Notice(SessionNoticeKind.OutputFaulted, $"output start failed: {ex.Message}");
             return CommandResult.Reject($"output-start-failed: {ex.Message}");
         }
+    });
+
+    /// <summary>
+    /// Applies a preset atomically (docs/06 §5.3.5): stop clips, stop capture
+    /// and monitor paths, abort the session epoch, validate, then commit the
+    /// new device config, gains and monitor preference and re-attach the
+    /// output. Sending and monitoring stay off; enable remains explicit.
+    /// </summary>
+    public PresetApplyResult ApplyPreset(PresetConfig preset) => _commands.SubmitValue("apply-preset", () =>
+    {
+        if (!PresetConfigRules.IsValidId(preset.PresetId))
+        {
+            return PresetApplyResult.Reject("invalid-preset-id");
+        }
+
+        var gainsValid = PresetConfigRules.IsValidGain(preset.MicGain, PresetConfig.GainLimits)
+            && PresetConfigRules.IsValidGain(preset.AppGain, PresetConfig.GainLimits)
+            && PresetConfigRules.IsValidGain(preset.ClipGain, PresetConfig.GainLimits)
+            && PresetConfigRules.IsValidGain(preset.Monitor.Gain, PresetConfig.GainLimits);
+        if (!gainsValid)
+        {
+            // structural garbage never reaches the runtime; the attempt still
+            // stops everything, the old selection stays (B06)
+            AbortForFailedSwitch();
+            return PresetApplyResult.Reject("invalid-gain");
+        }
+
+        TeardownAudioPaths();
+        Engine.AbortSession();
+
+        var issues = new List<RouteIssue>();
+        if (_options.DeviceValidator is { } validate)
+        {
+            issues.AddRange(validate(preset.Devices));
+        }
+
+        // commit: config swap, gains, disabled monitor preference, preset id
+        _devices = preset.Devices;
+        _gains = new RouteGains(preset.MicGain, preset.AppGain, preset.ClipGain, preset.Monitor.Gain);
+        Engine.ConfigureMonitorPreference(preset.Monitor.Mode);
+        _ = Engine.SwitchPreset(preset.PresetId);
+
+        // fresh output for the (possibly different) render endpoint; a failed
+        // attach leaves sending closed with a visible issue, not a rollback
+        string? attachRejection = null;
+        _output = SafeDispose(_output);
+        try
+        {
+            StartOutput();
+            _ = Engine.ValidateDevices();
+        }
+        catch (Exception ex)
+        {
+            _output = SafeDispose(_output);
+            attachRejection = ex.Message;
+            issues.Add(new RouteIssue(PresetRoute.VirtualOutput, "attach-failed"));
+            Notice(SessionNoticeKind.OutputFaulted, $"output attach failed after preset switch: {ex.Message}");
+        }
+
+        PublishState();
+        return new PresetApplyResult(true, null, issues, attachRejection);
+    });
+
+    /// <summary>Stops every audio path and aborts the session without changing the selected preset (B06 failure path, T38 delete-active).</summary>
+    public CommandResult TeardownForAbort() => _commands.Submit("abort-session", () =>
+    {
+        AbortForFailedSwitch();
+        return CommandResult.Ok;
     });
 
     public CommandResult EnableMic(bool enabled) => _commands.Submit($"mic-{(enabled ? "on" : "off")}", () => DoEnableMic(enabled));
@@ -174,7 +247,8 @@ public sealed class AudioSession : IDisposable
         Engine.Clip,
         Engine.MonitorSuspendedForPreview,
         Engine.MonitorMode,
-        _gains));
+        _gains,
+        _devices));
 
     /// <summary>Desensitized counters; components are safe to read from any thread.</summary>
     public SessionMetrics Metrics() => new(
@@ -229,6 +303,10 @@ public sealed class AudioSession : IDisposable
             return CommandResult.Reject("output-lost");
         }
 
+        if (_devices is null)
+        {
+            return CommandResult.Reject("no-device-config");
+        }
         var authorized = Engine.AuthorizeSource("mic", AudioKind.Microphone);
         if (!authorized.Accepted)
         {
@@ -243,7 +321,7 @@ public sealed class AudioSession : IDisposable
         {
             try
             {
-                _micAdapter = _options.MicAdapterFactory(_micChannel);
+                _micAdapter = _options.MicAdapterFactory(_devices!.MicDeviceId, _micChannel);
                 _micAdapter.Ended += reason => _commands.Post("mic-ended", () => HandleSourceEnded("mic", reason), urgent: true);
                 _micAdapter.Start();
             }
@@ -409,9 +487,15 @@ public sealed class AudioSession : IDisposable
 
     private CommandResult DoSetMonitor(bool enabled, MonitorMode mode)
     {
-        if (enabled && mode == MonitorMode.FullEndpoint && _options.MonitorCaptureFactory is null)
+        if (enabled && mode == MonitorMode.FullEndpoint
+            && (_options.MonitorCaptureFactory is null || _devices?.VirtualCaptureDeviceId is null))
         {
             return CommandResult.Reject("full-endpoint-unavailable");
+        }
+
+        if (enabled && _devices is null)
+        {
+            return CommandResult.Reject("no-device-config");
         }
 
         var result = Engine.SetMonitor(enabled, mode);
@@ -426,14 +510,14 @@ public sealed class AudioSession : IDisposable
             {
                 if (mode == MonitorMode.FullEndpoint && _monitorCapture is null)
                 {
-                    _monitorCapture = _options.MonitorCaptureFactory!(_monitorRouter);
+                    _monitorCapture = _options.MonitorCaptureFactory!(_devices!.VirtualCaptureDeviceId!, _monitorRouter);
                     _monitorCapture.Faulted += ex => _commands.Post("monitor-faulted", () => HandleMonitorFaulted(ex), urgent: true);
                     _monitorCapture.Start(_monitorRouter.PushFullEndpoint);
                 }
 
                 if (_monitorOutput is null)
                 {
-                    _monitorOutput = _options.MonitorOutputFactory();
+                    _monitorOutput = _options.MonitorOutputFactory(_devices!.MonitorDeviceId);
                     _monitorOutput.Faulted += ex => _commands.Post("monitor-faulted", () => HandleMonitorFaulted(ex), urgent: true);
                     _monitorOutput.Start(_monitorRouter.Read);
                 }
@@ -554,6 +638,38 @@ public sealed class AudioSession : IDisposable
         {
             Thread.Sleep(5);
         }
+    }
+
+    /// <summary>Creates and starts the output pump for the currently configured render endpoint; caller owns error handling.</summary>
+    private void StartOutput()
+    {
+        _output = _options.OutputFactory(_devices!.VirtualRenderDeviceId);
+        _output.Faulted += ex => _commands.Post("output-faulted", () => HandleOutputFaulted(ex), urgent: true);
+        _output.Start(MixPull);
+    }
+
+    /// <summary>Stops every live audio path except the output pump; engine state changes happen in the engine.</summary>
+    private void TeardownAudioPaths()
+    {
+        _clipPlayer.Stop();
+        _clipFeed.SetTicket(null);
+        _micChannel.SetTicket(null);
+        _micAdapter = SafeDispose(_micAdapter);
+        StopAppCapture();
+        StopMonitorDevices();
+        _monitorRouter.Clear();
+    }
+
+    private void AbortForFailedSwitch()
+    {
+        TeardownAudioPaths();
+        Engine.AbortSession();
+        if (_output is not null)
+        {
+            _ = Engine.ValidateDevices();
+        }
+
+        PublishState();
     }
 
     private void StopAppCapture()

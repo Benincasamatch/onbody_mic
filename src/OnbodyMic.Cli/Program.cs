@@ -69,6 +69,9 @@ internal static class Program
               enable --id <id> | disable --id <id>    toggle a disabled MMDevice endpoint (IPolicyConfig)
               panel [--mic-id id] [--render-id id] [--capture-id id] [--monitor-id id] [--app-pid n] [--root dir]
                                                       interactive panel (P1 session + P2 soundboard & hotkeys)
+                                                      with no device args the last applied preset restores (P3)
+              desktop (in OnbodyMic.Desktop) [--root dir] [--selftest]
+                                                      WinForms shell: main window, tray, first-run wizard (P3)
               p2smoke (--render-id <id> | --render <i>) (--capture-id <id> | --capture <i>) [--mic-id id]
                     [--presses n] [--out dir]
                                                       automated P2 gate smoke: hotkeys via SendInput under a
@@ -137,6 +140,12 @@ internal static class Program
         }
 
         using var device = WindowsAudioDevices.OpenById(id);
+        if (device is null)
+        {
+            Console.Error.WriteLine("endpoint not found");
+            return 1;
+        }
+
         Console.WriteLine($"endpoint={device.FriendlyName}");
         var sessions = WindowsEndpointSessions.List(id);
         for (var i = 0; i < sessions.Count; i++)
