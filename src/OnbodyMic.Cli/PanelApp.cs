@@ -37,9 +37,12 @@ internal static class PanelApp
             pid = 0;
         }
 
+        var soundboard = Soundboard.Create(options.GetValueOrDefault("root"), Console.WriteLine);
         using var session = new AudioSession(new AudioSessionOptions
         {
             ClipDecoder = new NAudioClipDecoder(),
+            SampleStore = soundboard.Cache,
+            ClipResolver = soundboard.Resolve,
             MicAdapterFactory = channel => new WindowsMicSource(micId, channel),
             AppAdapterFactory = (channel, binding) => new WindowsAppSource(binding, channel),
             OutputFactory = () => new WasapiExclusiveRenderPump(renderId),
@@ -63,9 +66,11 @@ internal static class PanelApp
             Console.WriteLine(bound.Accepted ? $"已绑定应用 pid={pid}" : $"绑定失败: {bound.Rejection}");
         }
 
-        Console.WriteLine("命令: help status metrics | mic on|off | extras on|off | app on|off | app bind <pid>");
-        Console.WriteLine("      play <file> | preview <file> | stop | monitor clip|full|off | gain mic|app|clip|monitor <v>");
-        Console.WriteLine("      mute | unmute | auto on|off | quit");
+        soundboard.Attach(session);
+
+        Console.WriteLine("命令: help status metrics | mic/extras/app on|off | bind app <pid> | play/preview <库ID或文件> | stop");
+        Console.WriteLine("      import/clips/fav/rename/clipgain/group/del | hotkeys, hotkey bind/unbind | cache | monitor clip|full|off");
+        Console.WriteLine("      gain mic|app|clip|monitor <v> | mute | unmute | auto on|off | quit");
         using var metrics = new MetricsPrinter(session);
         while (true)
         {
@@ -88,12 +93,13 @@ internal static class PanelApp
                 break;
             }
 
-            if (!Handle(session, command, parts, metrics))
+            if (!soundboard.Handle(command, parts) && !Handle(session, command, parts, metrics))
             {
                 Console.WriteLine("未知命令，输入 help 查看帮助");
             }
         }
 
+        soundboard.Dispose();
         return 0;
     }
 
@@ -102,9 +108,12 @@ internal static class PanelApp
         switch (command)
         {
             case "help":
-                Console.WriteLine("mic|extras|app on|off, bind app <pid>, play|preview <file>, stop,");
+                Console.WriteLine("mic|extras|app on|off, bind app <pid>, play|preview <库ID或文件路径>, stop,");
                 Console.WriteLine("monitor clip|full|off, gain mic|app|clip|monitor <v>, mute, unmute,");
-                Console.WriteLine("status, metrics, auto on|off, quit");
+                Console.WriteLine("status, metrics, auto on|off");
+                Console.WriteLine("import <文件> [--name 名] [--dup], clips [过滤] [--fav] [--group 组] [--sort name|time], search <词>");
+                Console.WriteLine("fav|unfav <clipId>, rename <clipId> <名>, clipgain <clipId> <0..4>, del <clipId>");
+                Console.WriteLine("group add|rename|del|set ..., hotkeys, hotkey bind|unbind ..., cache [prefill], quit");
                 return true;
             case "status":
                 PrintStatus(session);
@@ -242,7 +251,7 @@ internal static class PanelApp
         return false;
     }
 
-    private static string? ResolveEndpoint(
+    internal static string? ResolveEndpoint(
         Dictionary<string, string> options,
         string idKey,
         string indexKey,
@@ -280,7 +289,7 @@ internal static class PanelApp
         return candidates[chosen].Id;
     }
 
-    private static Dictionary<string, string> ParseOptions(string[] args)
+    internal static Dictionary<string, string> ParseOptions(string[] args)
     {
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         for (var i = 0; i + 1 < args.Length; i += 2)

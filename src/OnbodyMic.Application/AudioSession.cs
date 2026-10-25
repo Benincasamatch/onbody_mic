@@ -344,26 +344,60 @@ public sealed class AudioSession : IDisposable
         return setResult;
     }
 
-    private CommandResult DoStartClip(string path, bool send)
+    private CommandResult DoStartClip(string clipId, bool send)
     {
-        DecodedClip decoded;
-        try
+        // mirror the engine's preconditions before any file I/O: a rejected
+        // trigger must not pay for a decode (docs/01 §5.4 — reject, never queue)
+        if (send && (Engine.EmergencyLatched || !Engine.Switches.ExtrasSendEnabled))
         {
-            decoded = _decoder.Decode(path);
-        }
-        catch (Exception ex)
-        {
-            return CommandResult.Reject($"decode-failed: {ex.Message}");
+            return CommandResult.Reject("extras-disabled-or-emergency");
         }
 
-        var result = send ? Engine.PlayClip(path) : Engine.PreviewClip(path);
+        if (!send && Engine.EmergencyLatched)
+        {
+            return CommandResult.Reject("emergency-latched");
+        }
+
+        var resolution = _options.ClipResolver?.Invoke(clipId) ?? ClipResolution.Unknown;
+        if (resolution.Known && !resolution.Available)
+        {
+            return CommandResult.Reject($"clip-unavailable:{clipId}");
+        }
+
+        float[] samples;
+        if (_options.SampleStore is { } store && store.TryGet(clipId, out var cached))
+        {
+            samples = cached;
+        }
+        else
+        {
+            DecodedClip decoded;
+            try
+            {
+                decoded = _decoder.Decode(resolution.Path ?? clipId);
+            }
+            catch (Exception ex)
+            {
+                return CommandResult.Reject($"decode-failed: {ex.Message}");
+            }
+
+            samples = decoded.Samples;
+            if (resolution.Known)
+            {
+                // only stable library ids enter the cache; ad-hoc raw paths
+                // must not evict managed clips
+                _options.SampleStore?.Store(clipId, samples);
+            }
+        }
+
+        var result = send ? Engine.PlayClip(clipId) : Engine.PreviewClip(clipId);
         if (!result.Accepted)
         {
             return result;
         }
 
         var active = Engine.Clip!;
-        _clipPlayer.Start(active.ClipId, decoded.Samples, active.PlaybackEpoch, active.Mode);
+        _clipPlayer.Start(active.ClipId, samples, active.PlaybackEpoch, active.Mode, resolution.Gain);
         // preview deliberately carries no send ticket: the mixer denies and
         // drains it, so auditions can never reach the virtual output
         _clipFeed.SetTicket(active.Mode == ClipPlaybackMode.Send

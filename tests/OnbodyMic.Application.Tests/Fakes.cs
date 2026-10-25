@@ -114,7 +114,16 @@ public sealed class FakeDecoder : IClipDecoder
 {
     public Func<string, float[]> Generator { get; set; } = _ => CreateTone(0.5f, 4410);
 
-    public DecodedClip Decode(string path) => new(Generator(path));
+    public int Calls { get; private set; }
+
+    public string? LastPath { get; private set; }
+
+    public DecodedClip Decode(string path)
+    {
+        Calls++;
+        LastPath = path;
+        return new(Generator(path));
+    }
 
     public static float[] CreateTone(float amplitude, int frames)
     {
@@ -123,3 +132,64 @@ public sealed class FakeDecoder : IClipDecoder
         return samples;
     }
 }
+
+public sealed class FakeHotkeyService : IHotkeyService
+{
+    public List<HotkeyBinding> Bound { get; } = [];
+
+    public event Action<HotkeyTrigger>? Triggered;
+
+    public IReadOnlyList<HotkeyBinding> Active => Bound;
+
+    public CommandResult Register(HotkeyBinding binding)
+    {
+        if (Bound.Any(b => b.Gesture == binding.Gesture && !b.Matches(binding.Action, binding.TargetId)))
+        {
+            return CommandResult.Reject($"hotkey-conflict:{binding.Describe()}");
+        }
+
+        Bound.RemoveAll(b => b.Matches(binding.Action, binding.TargetId));
+        Bound.Add(binding);
+        return CommandResult.Ok;
+    }
+
+    public CommandResult Unregister(HotkeyAction action, string? targetId)
+    {
+        Bound.RemoveAll(b => b.Matches(action, targetId));
+        return CommandResult.Ok;
+    }
+
+    /// <summary>Fires a bound activation synchronously on the test thread.</summary>
+    public void Fire(HotkeyBinding binding) => Triggered?.Invoke(new HotkeyTrigger(binding, Environment.TickCount64));
+
+    public void Dispose()
+    {
+    }
+}
+
+public sealed class FakeSampleStore : IClipSampleStore
+{
+    public Dictionary<string, float[]> Stored { get; } = [];
+
+    public List<string> StoredIds { get; } = [];
+
+    public bool TryGet(string clipId, out float[] samples)
+    {
+        if (Stored.TryGetValue(clipId, out samples!))
+        {
+            return true;
+        }
+
+        samples = [];
+        return false;
+    }
+
+    public void Store(string clipId, float[] samples)
+    {
+        Stored[clipId] = samples;
+        StoredIds.Add(clipId);
+    }
+
+    public void Remove(string clipId) => Stored.Remove(clipId);
+}
+

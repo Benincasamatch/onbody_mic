@@ -6,6 +6,13 @@ namespace OnbodyMic.Application;
 /// </summary>
 public sealed class AudioSessionOptions
 {
+    /// <summary>Pre-decoded sample cache keyed by stable clip id; null disables preloading.</summary>
+    public IClipSampleStore? SampleStore { get; init; }
+
+    /// <summary>Resolves stable clip ids to managed assets and per-clip gain; null keeps raw-path playback.</summary>
+    public Func<string, ClipResolution>? ClipResolver { get; init; }
+
+    /// <summary>Full-predecode clip decoder used on cache misses.</summary>
     public required IClipDecoder ClipDecoder { get; init; }
 
     /// <summary>Creates the microphone adapter bound to the mic channel.</summary>

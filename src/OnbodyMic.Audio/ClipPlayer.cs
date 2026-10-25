@@ -15,8 +15,8 @@ public sealed class ClipPlayer
     private ActiveClip? _active;
     private long _completedPlaybacks;
     private long _replacedPlaybacks;
+    private float _gain = 1f;
 
-    /// <summary>Raised on the pulling thread when a playback finishes naturally.</summary>
     public event Action<ActiveClip>? PlaybackCompleted;
 
     public ActiveClip? Active
@@ -32,7 +32,7 @@ public sealed class ClipPlayer
 
     public long CompletedPlaybacks => _completedPlaybacks;
 
-    public void Start(string clipId, float[] samples, long playbackEpoch, ClipPlaybackMode mode)
+    public void Start(string clipId, float[] samples, long playbackEpoch, ClipPlaybackMode mode, float gain = 1f)
     {
         lock (_gate)
         {
@@ -43,6 +43,7 @@ public sealed class ClipPlayer
 
             _samples = samples;
             _position = 0;
+            _gain = gain;
             _active = new ActiveClip(clipId, playbackEpoch, mode);
         }
     }
@@ -54,6 +55,7 @@ public sealed class ClipPlayer
             _active = null;
             _position = 0;
             _samples = [];
+            _gain = 1f;
         }
     }
 
@@ -72,6 +74,14 @@ public sealed class ClipPlayer
 
             taken = Math.Min(frames, _samples.Length - _position);
             Array.Copy(_samples, _position, destination, 0, taken);
+            if (_gain != 1f)
+            {
+                for (var i = 0; i < taken; i++)
+                {
+                    destination[i] *= _gain;
+                }
+            }
+
             if (taken < frames)
             {
                 Array.Clear(destination, taken, frames - taken);

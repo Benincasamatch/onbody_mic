@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>OnbodyMic.Media</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OnbodyMic.Audio\OnbodyMic.Audio.csproj" />
+    <ProjectReference Include="..\OnbodyMic.Persistence\OnbodyMic.Persistence.csproj" />
+  </ItemGroup>
+</Project>

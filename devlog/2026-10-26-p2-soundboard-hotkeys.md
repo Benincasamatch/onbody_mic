@@ -1,0 +1,83 @@
+# 2026-10-26 P2 音效库与全局热键 开发日志
+
+## 本轮范围
+
+用户指令"从P2开始继续完成项目 mvp"。P1 已关闭（安全路由稳定，前置满足）。本轮完成 docs/03 §2 P2 全部六项任务：受管音效库（导入校验/稳定 ID/元数据持久化/收藏/搜索/单级分组/排序/删除引用清理）、有界预加载缓存、全局热键（注册/冲突/编辑暂停/单一分派）、面板集成、自动化测试与真机冒烟。
+
+## 工程成果（新增两个程序集 + 热键后端 + 面板扩展）
+
+```text
+src/OnbodyMic.Persistence/      JSON 持久化（零第三方依赖）
+  AtomicFile.cs                 临时写→flush→复读校验→File.Replace+备份；失败不截断旧文件
+  GlobalSettings.cs             schemaVersion=1 校验/加载/保存：动作热键/音效热键（悬空保留标红、重复手势不激活、未知动作不激活）、ui 偏好
+src/OnbodyMic.Media/            音效库与缓存
+  ClipLibrary.cs                导入（存在性/扩展名/大小上限/全量解码校验/时长上限）→ SHA-256 查重（重复可提示可强制）→ 受管复制 assets/<clipId>.<ext> → 原子索引；收藏/重命名/增益/搜索/排序/单级分组 CRUD/删除（只删副本）；索引加载校验（重复 ID、越界路径、非有限增益拒绝；悬空分组降级未分组）
+  ClipCache.cs                  有界 LRU（默认 60s 引擎音频 ≈10.6MB），超限单条拒收不淘汰；Prefill 收藏优先、塞满即止不挤占已缓存条目
+Domain/Hotkeys.cs               HotkeyAction（六动作）/HotkeyModifiers（位值=MOD_*）/HotkeyGesture（VK 编码表+解析格式化）/HotkeyBinding/HotkeyTrigger
+Audio/IClipSampleStore.cs       缓存契约（TryGet/Store/Remove）；ClipPlayer 增加逐条增益（读时乘法，零分配）
+Application/HotkeyDispatcher.cs 单一分派点：PlayClip/StopClip/ToggleExtras/ToggleMic/ToggleMonitor/EmergencyMute；编辑暂停（紧急静音豁免）；绑定时校验目标（悬空/素材缺失拒绝）；触发时悬空拒绝不落原始路径解码
+  AudioSession                  DoStartClip 重写：提前镜像引擎前置（拒绝不付解码代价）→ 缓存命中 → 解析（Known/Available/Path/Gain）→ 未命中解码且仅稳定 ID 入缓存（原始路径不污染缓存）；不可用素材明确拒绝
+Platform.Windows/WindowsHotkeyService.cs  RegisterHotKey + 专有线程消息泵（PostThreadMessage 控制/WM_QUIT 退出）；内部手势冲突先于 OS 拒绝；换绑事务（新键注册成功才注销旧键）；RegisterHotKey 物理按压一次一响=按住去重的结构性保证
+Cli/PanelSoundboard.cs          面板库/热键/缓存命令面（import/clips/search/fav/rename/clipgain/group/del/hotkey bind-unbind-list/cache）+ 启动恢复持久化绑定 + 绑定即存（保存失败显式提示）
+Cli/P2Smoke.cs                  P2 门槛自动化冒烟（见下）
+```
+
+## 关键实现决策（工程事实）
+
+1. **JSON 命名策略**：docs/06 示意全部 camelCase；STJ 默认大小写敏感导致手工 JSON 不绑定（测试当场抓住：未知 schema 不抛、绑定全空）。两处 JsonOptions 统一 `CamelCase + CaseInsensitive`，读写一致。
+2. **STJ 拒绝非有限浮点是结构性的**（无 NumberHandling 允许时 NaN 无法写入/读出），配合索引加载校验形成双保险。
+3. **热键播放的分派边界**：dispatcher 触发时若解析结果非"已知且可用"直接拒绝（含绑定后素材被删的悬空情形），绝不把 clipId 当原始路径解码——热键目标语义上只能是库条目。
+4. **会话提前镜像引擎前置**：`send && (EmergencyLatched || !ExtrasSend)` 在任何 I/O 前拒绝（docs/01 §5.4 拒绝不排队不付解码代价）；引擎仍是安全权威，镜像仅为省解码。
+5. **缓存键只收稳定库 ID**：ad-hoc 原始路径播放解码但不入缓存，防止一次性大文件把预加载的常用音效挤出去。
+6. **Prefill 不淘汰**：收藏优先序下预算塞满即 break——否则后进条目会把先进收藏挤掉，违背优先序。
+7. **INPUT 结构体取证**：x64 上 INPUT 必须封送到 40 字节（union 需含 MOUSEINPUT 尺寸 32B）；仅含 KeyboardInput 的 union 得 32B，SendInput 以 87（ERROR_INVALID_PARAMETER）静默拒收。探针实证后修复并显式告警。
+
+## 环境限制取证（重要，不冒充已验证）
+
+代理执行外壳的桌面**收不到 SendInput 注入**：三步定性——(a) WindowsHotkeyService 绑定成功但注入零触发；(b) 主线程裸 RegisterHotKey+GetMessage 泵同样零触发；(c) **本进程自己的 WH_KEYBOARD_LL 低级钩子看不到自己注入的键** → 注入根本未进入系统输入流。线程桌面与输入桌面同名 Default，排除桌面错位；属外壳输入沙箱。结论：
+
+- RegisterHotKey 注册/冲突/事务语义：真机验证 ✅（四条绑定全部注册成功）。
+- 热键触发→分派→会话命令链路：**35 项 Application 单测**（FakeHotkeyService 全动作+安全语义）覆盖；真机物理按键验证待用户交互会话（与 P1 遗留 KOOK 复听同类流程）。
+- p2smoke 因此实现**双驱动**：注入探测（探针热键 Ctrl+Alt+F6 + 一次注入）成功→keys 模式（真热键全链路，用户交互会话可用）；失败→direct 模式（直驱 dispatcher 转发的同一批会话命令），音频侧取证完全有效，延迟数字标注为"命令提交→送达"（引擎路径），不冒充热键指标。
+
+## 真机冒烟（ENV-001，p2smoke direct 模式，取证 WAV `.tools/tmp/p2smoke/p2smoke_capture.wav` 不入库）
+
+| 场景 | 结果 | 结论 |
+| --- | --- | --- |
+| 导入+预加载 | clip-xxx 500ms，prefill=1，缓存命中播放（面板复测 命中=1） | T15/缓存语义 |
+| 触发→线缆送达延迟 | n=24，P50=47 / P95=63 / max=63 ms（命令提交→capture onset） | 引擎路径健康，与 P1 P95 51-56 一致；热键 P95≤80 目标待交互会话 keys 模式实测 |
+| T13 替换/重播 | 双击重触发：最大静默 6ms 无级断裂 | 替换语义真机成立 |
+| T12 热停止 | 停止后 150-600ms 窗口能量 0.000 | 只停音效 |
+| 发送关闭门（T16/gate） | extras 关闭后播放触发：会话拒绝（Clip=null）+ 线缆 700ms 窗口能量 0.000；重新开启后无排队补播 | 不隐式发声不排队 |
+| 紧急静音 | 热键动作→EmergencyMuted 锁存，播放拒绝，解锁仍全关 | T10 于 P2 路径复刻 |
+| 麦克风连续性 | clip 播放+停止全程 micSendEnabled=true，52,007 帧持续推送 | 停音效不误关真麦 |
+
+面板全命令链路真机复测：跨运行持久化恢复（第二轮启动列出上轮导入条目）、分组/重命名/收藏/增益、热键绑定/解除/列表、按 ID 播放走缓存、删除清理副本与绑定。
+
+## 测试（全部通过，0 警告；全量 121 项）
+
+- Domain 31（新增 22：手势解析/格式化往返、VK 编码、非法 token、动作名往返）
+- Audio 24（ClipPlayer 增益由会话与播放器测试间接覆盖）
+- Persistence 12（新增：原子写新文件/覆盖备份/无临时残留；设置往返/损坏抛且文件不动/未知 schema/未知动作不激活/坏手势/重复手势只激活首个/空手势=未绑定/坏排序回退）
+- Media 19（导入校验矩阵/重复检测与强制/管理矩阵/分组 CRUD 与降级/删除只删副本/素材缺失不可用/索引损坏不覆盖/路径逃逸拒绝/增益校验/预填充顺序；缓存 LRU/超限/更新原位/命中统计/预填充不淘汰）
+- Application 35（新增热键分派 10：发送关拒绝不解码不排队、播放过闸、连击替换序、停止只停音效、开关热键互不串扰、暂停下紧急豁免、绑定校验/冲突/换绑、悬空拒绝不路径化、监听开关；会话缓存 5：未中解码入库、命中免解码、素材缺失拒绝、逐条增益、原始路径不入缓存）
+
+## P2 门槛对照（docs/03 §2 P2）
+
+- 用户能不切出游戏触发/停止指定音效：机制就绪（注册+分派+面板/热键双入口）；**真机游戏前台矩阵（T17）与热键物理触发待用户交互会话**（外壳输入沙箱限制已取证）。
+- 麦克风不中断：direct 模式真机 + 单测双证 ✅
+- 发送关闭时不会因热键自动发声：真机（线缆能量 0.000 + 无排队）+ 单测（拒绝不排队不解码）双证 ✅
+
+## 遗留与限制（不冒充已验证）
+
+1. **热键交互会话验证**：用户在正常终端跑 `p2smoke --render 4 --capture 1 --presses 20`（keys 模式）+ 实际游戏前台/全屏组合（T17 普通/提升权限、窗口/全屏矩阵）。产品侧无已知阻塞：注册成功、分派链路 35 项单测、注入探针自动化降级。
+2. T14 的"无权限"导入分支未真机复现（本机无该错误条件路径）；损坏/超限/超长/坏扩展已测。
+3. 音效库上限为工程默认（单文件 32MB/60s、缓存 60s），未按真实素材量校准；P3/P4 依据用户素材实测再冻结。
+4. 手势解析表未含 OEM 扩展键以外的小众键；面板已对无修饰键绑定给出游戏冲突提示。
+5. 预设热键（SelectPreset）按计划随 P3 预设实装；设置文件已预留空节。
+6. 修复显示层 int 溢出（缓存上限 ms 打印）后无遗留已知缺陷。
+
+## Git
+
+- 提交见 `git log`（feat(P2): ...）。
+- 下一步：P3 预设/监听/日常界面（前置：P2 音效行为通过测试 ✅；热键交互验证建议先行）。

@@ -7,6 +7,8 @@
   <ItemGroup>
     <ProjectReference Include="..\OnbodyMic.Application\OnbodyMic.Application.csproj" />
     <ProjectReference Include="..\OnbodyMic.Domain\OnbodyMic.Domain.csproj" />
+    <ProjectReference Include="..\OnbodyMic.Media\OnbodyMic.Media.csproj" />
+    <ProjectReference Include="..\OnbodyMic.Persistence\OnbodyMic.Persistence.csproj" />
     <ProjectReference Include="..\OnbodyMic.Platform.Windows\OnbodyMic.Platform.Windows.csproj" />
   </ItemGroup>
 </Project>

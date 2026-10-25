@@ -29,8 +29,8 @@ internal static class Program
                 "loop" => Loop(args[1..]),
                 "mixloop" => MixLoop(args[1..]),
                 "latency" => LatencyProbe(args[1..]),
-                "proloop" => ProcLoop(args[1..]),
                 "panel" => PanelApp.Run(args[1..]),
+                "p2smoke" => P2Smoke.Run(args[1..]),
                 _ => Usage(),
             };
         }
@@ -67,11 +67,12 @@ internal static class Program
                     [--bursts n] [--period-ms n] [--burst-ms n] [--engine mmcss|naudio]
                                                       200-burst engine->virtual-input latency matrix
               enable --id <id> | disable --id <id>    toggle a disabled MMDevice endpoint (IPolicyConfig)
-              setformat --id <id> --rate <hz> [--channels c]
-              panel [--mic-id id] [--render-id id] [--capture-id id] [--monitor-id id] [--app-pid n]
-                                                      interactive P1 control panel (real session)
-              setformat --id <id> --rate <hz> [--channels c]
-                                                      set endpoint shared-mode format to float32 (IPolicyConfig)
+              panel [--mic-id id] [--render-id id] [--capture-id id] [--monitor-id id] [--app-pid n] [--root dir]
+                                                      interactive panel (P1 session + P2 soundboard & hotkeys)
+              p2smoke (--render-id <id> | --render <i>) (--capture-id <id> | --capture <i>) [--mic-id id]
+                    [--presses n] [--out dir]
+                                                      automated P2 gate smoke: hotkeys via SendInput under a
+                                                      fullscreen surrogate, cable-side forensics, latency P95
             """);
         return 0;
     }
