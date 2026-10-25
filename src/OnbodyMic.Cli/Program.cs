@@ -21,11 +21,13 @@ internal static class Program
                 "enable" => SetEnabled(args[1..], true),
                 "disable" => SetEnabled(args[1..], false),
                 "setformat" => SetFormat(args[1..]),
+                "sessions" => ListSessions(args[1..]),
                 "tone" => PlayTone(args[1..]),
                 "record" => Record(args[1..]),
                 "analyze" => Analyze(args[1..]),
                 "loop" => Loop(args[1..]),
                 "mixloop" => MixLoop(args[1..]),
+                "latency" => LatencyProbe(args[1..]),
                 _ => Usage(),
             };
         }
@@ -54,6 +56,7 @@ internal static class Program
               mixloop (--mic .. | --mic-id ..) (--render .. | --render-id ..) (--capture .. | --capture-id ..)
                     --out <file.wav> [--freq hz] [--gain g] [--micgain g] [--rate hz] [--seconds s]
                                                       mic+sfx mixed into the cable, verified at the capture side
+                    [--monitor local|cable] [--render-latency ms] [--monitor-latency ms]
               analyze --file <f.wav> [--freq hz] [--peaks] [--onset <thr>]
               enable --id <id> | disable --id <id>    toggle a disabled MMDevice endpoint (IPolicyConfig)
               setformat --id <id> --rate <hz> [--channels c]
@@ -106,6 +109,27 @@ internal static class Program
         var channels = (int)ParseDouble(options, "channels", 1);
         WindowsEndpointControl.SetDeviceFormat(id, rate, channels);
         Console.WriteLine($"set format: {id} -> {rate} Hz, {channels} ch, float32");
+        return 0;
+    }
+
+    private static int ListSessions(string[] rest)
+    {
+        var options = ParseOptions(rest);
+        if (!options.TryGetValue("id", out var id))
+        {
+            Console.Error.WriteLine("sessions requires --id <endpointId>");
+            return 1;
+        }
+
+        using var device = WindowsAudioDevices.OpenById(id);
+        Console.WriteLine($"endpoint={device.FriendlyName}");
+        var sessions = WindowsEndpointSessions.List(id);
+        for (var i = 0; i < sessions.Count; i++)
+        {
+            Console.WriteLine($"session[{i}] pid={sessions[i].ProcessId} process={sessions[i].ProcessName} state={sessions[i].State}");
+        }
+
+        Console.WriteLine($"total={sessions.Count}");
         return 0;
     }
     private static int PlayTone(string[] rest)
@@ -315,6 +339,10 @@ internal static class Program
         var gain = ParseDouble(options, "gain", 0.3);
         var micGain = ParseDouble(options, "micgain", 1.0);
         var rate = (int)ParseDouble(options, "rate", 44100);
+        var monitorMode = options.GetValueOrDefault("monitor", "");
+
+        var renderLatencyMs = (int)ParseDouble(options, "render-latency", 50);
+        var monitorLatencyMs = (int)ParseDouble(options, "monitor-latency", 80);
         if (seconds <= 2 || frequency <= 0 || gain is < 0 or > 1 || micGain < 0)
         {
             Console.Error.WriteLine("seconds>2, freq>0, gain within [0,1], micgain>=0");
@@ -335,7 +363,14 @@ internal static class Program
         // verification capture: exactly what KOOK would hear from the cable
         using var cableCapture = new WasapiCapture(cableDevice);
         using var writer = new WaveFileWriter(outFile, cableCapture.WaveFormat);
-        cableCapture.DataAvailable += (_, e) => writer.Write(e.Buffer, 0, e.BytesRecorded);
+        var monitorBuffer = monitorMode == "cable"
+            ? new BufferedWaveProvider(cableCapture.WaveFormat) { DiscardOnBufferOverflow = true, BufferDuration = TimeSpan.FromSeconds(2) }
+            : null;
+        cableCapture.DataAvailable += (_, e) =>
+        {
+            writer.Write(e.Buffer, 0, e.BytesRecorded);
+            monitorBuffer?.AddSamples(e.Buffer, 0, e.BytesRecorded);
+        };
         cableCapture.StartRecording();
 
         // live mic buffered, then resampled into the cable's exclusive format
@@ -352,19 +387,53 @@ internal static class Program
         var cableFloat = WaveFormat.CreateIeeeFloatWaveFormat(rate, 2);
         var micResampled = new MediaFoundationResampler(micBuffer, cableFloat).ToSampleProvider();
         var micScaled = new VolumeSampleProvider(micResampled) { Volume = (float)micGain };
-        var sine = new SineWaveProvider(frequency, gain, cableFloat).ToSampleProvider();
+        var beepHz = ParseDouble(options, "beep", 0);
+        var sine = new SineWaveProvider(frequency, gain, cableFloat, beepHz).ToSampleProvider();
         var mixer = new MixingSampleProvider(cableFloat) { ReadFully = true };
         mixer.AddMixerInput(micScaled);
         mixer.AddMixerInput(sine);
 
-        using var output = new WasapiOut(renderDevice, AudioClientShareMode.Exclusive, false, 50);
-        output.Init(new SampleToWaveProvider16(mixer));
+        using var output = new WasapiOut(renderDevice, AudioClientShareMode.Exclusive, false, renderLatencyMs);
+        var mixStream = new SampleToWaveProvider16(mixer);
+        BroadcastWaveProvider? tap = null;
+        if (monitorMode == "local")
+        {
+            tap = new BroadcastWaveProvider(mixStream);
+            output.Init(tap);
+        }
+        else
+        {
+            output.Init(mixStream);
+        }
+
         output.Play();
+        WasapiOut? monitorOut = null;
+        if (monitorMode == "local")
+        {
+            monitorOut = new WasapiOut(AudioClientShareMode.Shared, monitorLatencyMs);
+            monitorOut.Init(tap!.AddSink());
+            monitorOut.Play();
+        }
+        else if (monitorMode == "cable" && monitorBuffer is not null)
+        {
+            var monitorStereo = WaveFormat.CreateIeeeFloatWaveFormat(rate, 2);
+            monitorOut = new WasapiOut(AudioClientShareMode.Shared, monitorLatencyMs);
+            monitorOut.Init(new MediaFoundationResampler(monitorBuffer, monitorStereo));
+            monitorOut.Play();
+        }
+
         Console.WriteLine($"mixing mic + {frequency:N0} Hz -> {renderDevice.FriendlyName} (exclusive {rate} Hz)");
         Console.WriteLine($"verifying from cable capture: {cableDevice.FriendlyName}");
+        if (monitorOut is not null)
+        {
+            Console.WriteLine($"monitor={monitorMode} -> 默认输出设备 (local=混音直通低延迟; cable=实际线缆内容, 含你自己的声音)");
+        }
+
         Console.WriteLine("speak into the mic during this run ...");
         Thread.Sleep(TimeSpan.FromSeconds(seconds - 1));
         output.Stop();
+        monitorOut?.Stop();
+        monitorOut?.Dispose();
         micCapture.StopRecording();
         Thread.Sleep(300);
         cableCapture.StopRecording();
@@ -485,12 +554,147 @@ internal static class Program
 
     private static int ReadInt24(byte[] buffer, int offset) =>
         buffer[offset] | (buffer[offset + 1] << 8) | (buffer[offset + 2] << 16);
+
+    /// <summary>
+    /// Plays a continuous sine into the cable render while recording the cable capture (A)
+    /// and a loopback of the default render (B, the monitor path). Cross-correlates 1ms
+    /// envelopes to report the monitor-path latency precisely; absolute legs stay approximate
+    /// because capture start offsets are engine-side.
+    /// </summary>
+    private static int LatencyProbe(string[] rest)
+    {
+        var options = ParseOptions(rest);
+        var hasRender = options.ContainsKey("render") || options.ContainsKey("render-id");
+        var hasCable = options.ContainsKey("capture") || options.ContainsKey("capture-id");
+        if (!hasRender || !hasCable || !options.TryGetValue("outa", out var outA) || !options.TryGetValue("outb", out var outB))
+        {
+            Console.Error.WriteLine("latency requires (--render <i> | --render-id <id>) (--capture <i> | --capture-id <id>) --outa <cable.wav> --outb <loopback.wav>");
+            return 1;
+        }
+
+        var frequency = ParseDouble(options, "freq", 440);
+        var gain = ParseDouble(options, "gain", 0.4);
+        var renderLatencyMs = (int)ParseDouble(options, "render-latency", 50);
+        using var renderDevice = ResolveDevice(options, "render", "render-id", capture: false);
+        using var cableDevice = ResolveDevice(options, "capture", "capture-id", capture: true);
+        if (renderDevice is null || cableDevice is null)
+        {
+            Console.Error.WriteLine("render or cable capture endpoint not found");
+            return 1;
+        }
+
+        using var loopback = new WasapiLoopbackCapture();
+        using var writerB = new WaveFileWriter(outB, loopback.WaveFormat);
+        loopback.DataAvailable += (_, e) => writerB.Write(e.Buffer, 0, e.BytesRecorded);
+
+        using var cableCapture = new WasapiCapture(cableDevice);
+        using var writerA = new WaveFileWriter(outA, cableCapture.WaveFormat);
+        cableCapture.DataAvailable += (_, e) => writerA.Write(e.Buffer, 0, e.BytesRecorded);
+
+        loopback.StartRecording();
+        cableCapture.StartRecording();
+        Thread.Sleep(500);
+
+        using var output = new WasapiOut(renderDevice, AudioClientShareMode.Exclusive, false, renderLatencyMs);
+        output.Init(new SineWaveProvider(frequency, gain, new WaveFormat(44100, 16, 2)));
+        output.Play();
+        Thread.Sleep(2500);
+        output.Stop();
+        Thread.Sleep(400);
+        loopback.StopRecording();
+        cableCapture.StopRecording();
+        Thread.Sleep(300);
+        writerA.Flush();
+        writerB.Flush();
+        writerA.Dispose();
+        writerB.Dispose();
+
+        Console.WriteLine($"render={renderDevice.FriendlyName} (exclusive 44100Hz, buffer {renderLatencyMs}ms)");
+        var envA = LoadEnvelopeMs(outA);
+        var envB = LoadEnvelopeMs(outB);
+        var bestLag = int.MinValue;
+        double bestScore = double.NegativeInfinity;
+        for (var lag = -600; lag <= 600; lag++)
+        {
+            double score = 0;
+            var count = 0;
+            for (var i = 0; i + lag >= 0 && i < envA.Length && i + lag < envB.Length; i++)
+            {
+                score += envA[i] * envB[i + lag];
+                count++;
+            }
+
+            if (count > 100 && score / count > bestScore)
+            {
+                bestScore = score / count;
+                bestLag = lag;
+            }
+        }
+
+        Console.WriteLine(bestLag == int.MinValue
+            ? "lag=unresolved (no overlap)"
+ : $"lag_b_minus_a_ms={bestLag} (score={bestScore:F5}) -> 线缆->监听输出 延迟");
+        return 0;
+    }
+
+    private static float[] LoadEnvelopeMs(string path)
+    {
+        using var reader = new WaveFileReader(path);
+        var format = reader.WaveFormat;
+        if (format.Encoding != WaveFormatEncoding.IeeeFloat)
+        {
+            throw new NotSupportedException($"expected float wav, got {format.Encoding}");
+        }
+
+        var framesPerMs = format.SampleRate / 1000.0;
+        var samples = new List<float>();
+        var buffer = new byte[16384];
+        while (reader.Position < reader.Length)
+        {
+            var bytesRead = reader.Read(buffer, 0, buffer.Length);
+            if (bytesRead <= 0)
+            {
+                break;
+            }
+
+            var frameBytes = sizeof(float) * format.Channels;
+            for (var at = 0; at + frameBytes <= bytesRead; at += frameBytes)
+            {
+                var sum = 0f;
+                for (var c = 0; c < format.Channels; c++)
+                {
+                    sum += BitConverter.ToSingle(buffer, at + (c * sizeof(float)));
+                }
+
+                samples.Add(sum / format.Channels);
+            }
+        }
+
+        var bins = (int)(samples.Count / framesPerMs);
+        var envelope = new float[bins];
+        for (var bin = 0; bin < bins; bin++)
+        {
+            var from = (int)(bin * framesPerMs);
+            var to = (int)((bin + 1) * framesPerMs);
+            var acc = 0f;
+            for (var i = from; i < to; i++)
+            {
+                acc += Math.Abs(samples[i]);
+            }
+
+            envelope[bin] = acc / Math.Max(1, to - from);
+        }
+
+        return envelope;
+    }
 }
 
-internal sealed class SineWaveProvider(double frequency, double amplitude, WaveFormat? format = null) : IWaveProvider
+internal sealed class SineWaveProvider(double frequency, double amplitude, WaveFormat? format = null, double beepHz = 0) : IWaveProvider
 {
     private readonly WaveFormat _format = format ?? WaveFormat.CreateIeeeFloatWaveFormat(48000, 2);
     private double _phase;
+    private double _modPhase;
+
 
     public WaveFormat WaveFormat => _format;
 
@@ -501,7 +705,8 @@ internal sealed class SineWaveProvider(double frequency, double amplitude, WaveF
         var frames = count / frameBytes;
         for (var i = 0; i < frames; i++)
         {
-            var value = Math.Sin(_phase) * amplitude;
+            var envelope = beepHz <= 0 ? 1.0 : (Math.Sin(_modPhase) >= 0 ? 1.0 : 0.0);
+            var value = Math.Sin(_phase) * amplitude * envelope;
             for (var c = 0; c < _format.Channels; c++)
             {
                 var at = offset + (i * frameBytes) + (c * bytesPerSample);
@@ -520,8 +725,50 @@ internal sealed class SineWaveProvider(double frequency, double amplitude, WaveF
             {
                 _phase -= 2.0 * Math.PI;
             }
+            _modPhase += 2.0 * Math.PI * beepHz / _format.SampleRate;
+            if (_modPhase > 2.0 * Math.PI)
+            {
+                _modPhase -= 2.0 * Math.PI;
+            }
         }
 
         return frames * frameBytes;
+    }
+}
+
+/// <summary>
+/// One pull-driven source fanned out to independent sinks: the main render consumes the
+/// source, every consumed block is also appended to each sink's elastic buffer so a second
+/// consumer (local monitor) can drain at its own pace.
+/// </summary>
+internal sealed class BroadcastWaveProvider(IWaveProvider source) : IWaveProvider
+{
+    private readonly List<BufferedWaveProvider> _sinks = [];
+
+    public WaveFormat WaveFormat => source.WaveFormat;
+
+    public BufferedWaveProvider AddSink()
+    {
+        var sink = new BufferedWaveProvider(source.WaveFormat)
+        {
+            DiscardOnBufferOverflow = true,
+            BufferDuration = TimeSpan.FromSeconds(1),
+        };
+        _sinks.Add(sink);
+        return sink;
+    }
+
+    public int Read(byte[] buffer, int offset, int count)
+    {
+        var read = source.Read(buffer, offset, count);
+        if (read > 0)
+        {
+            foreach (var sink in _sinks)
+            {
+                sink.AddSamples(buffer, offset, read);
+            }
+        }
+
+        return read;
     }
 }

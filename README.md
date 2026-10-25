@@ -16,6 +16,8 @@
 
 > 2026-10-25 更新（二）：用户决定不使用 VB-CABLE。免安装路线已验证成立：Steam Streaming Speakers 驱动（本机已有）的隐藏 capture 端点经 IPolicyConfig 启用后构成数字虚拟线缆；独占模式 44.1kHz 写入其 render 端点，capture 端点干净检出测试音（信噪比 10^6 量级，链路约 21ms），真麦+音效混合原型（mixloop）同通。KOOK 实收与进程隔离为 P0B 剩余项。详见 [开发日志](devlog/2026-10-25-p0a-p0b-mvp.md)。
 
+> 2026-10-25 更新（三）：KOOK 0.112.0 已确认持续接收虚拟麦（会话枚举证据 + 用户实测听到哔声与人声），T02/T03 实质通过；KOOK 回声链路 69ms，自声音延迟经 `--monitor local`（混音直通监听）降至 ~50-70ms。详见 [开发日志](devlog/2026-10-25-p0a-p0b-mvp.md)。
+
 ## 文档导航
 
 | 文档 | 内容 |
