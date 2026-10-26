@@ -19,8 +19,8 @@ internal sealed class TrayContext : ApplicationContext
     private readonly ToolStripMenuItem _micItem = new("真麦发送");
     private readonly ToolStripMenuItem _extrasItem = new("附加音频（应用+音效）");
     private readonly ToolStripMenuItem _monitorItem = new("本地监听");
-    private readonly ToolStripMenuItem _muteItem = new("紧急全静音");
-    private readonly ToolStripMenuItem _settingsItem = new("设备与监听设置...");
+    private readonly ToolStripMenuItem _muteItem = new("全部静音");
+    private readonly ToolStripMenuItem _settingsItem = new("设备设置...");
     private readonly ToolStripMenuItem _exitItem = new("退出");
 
     public TrayContext(AppShell shell, bool showFirstRun)
@@ -113,10 +113,10 @@ internal sealed class TrayContext : ApplicationContext
         var result = command();
         if (!result.Accepted)
         {
-            _tray.BalloonTipTitle = what;
-            _tray.BalloonTipText = $"被拒绝: {result.Rejection}";
+            _tray.BalloonTipTitle = $"{what}未生效";
+            _tray.BalloonTipText = $"{Rejections.Describe(result.Rejection)}\n{Rejections.NextStep(result.Rejection)}";
             _tray.BalloonTipIcon = ToolTipIcon.Warning;
-            _tray.ShowBalloonTip(3000);
+            _tray.ShowBalloonTip(5000);
         }
 
         RefreshTray();
@@ -129,6 +129,7 @@ internal sealed class TrayContext : ApplicationContext
         _micItem.Checked = status.Switches.MicSendEnabled;
         _extrasItem.Checked = status.Switches.ExtrasSendEnabled;
         _monitorItem.Checked = status.Switches.MonitorEnabled;
+        _muteItem.Text = status.EmergencyLatched ? "解除静音（保持全关）" : "全部静音";
         var phase = status.EmergencyLatched
             ? "紧急静音"
             : status.Switches.AnySendEnabled ? "发送中" : "全关";

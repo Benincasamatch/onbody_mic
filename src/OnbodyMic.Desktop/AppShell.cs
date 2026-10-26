@@ -22,6 +22,7 @@ internal sealed class AppShell : IDisposable
         // coclass via raw interop: once the cached RCW belongs to another
         // type, NAudio's coclass cast fails (P1 constraint, devlog 2026-10-26)
         _ = WindowsAudioDevices.List(activeOnly: true);
+        Devices = new DeviceCatalog(log);
         Soundboard = Soundboard.Create(rootOverride, log);
         Session = new AudioSession(new AudioSessionOptions
         {
@@ -46,6 +47,9 @@ internal sealed class AppShell : IDisposable
     public Action<string> Log { get; }
 
     public Soundboard Soundboard { get; }
+
+    /// <summary>Cached endpoint list; scans run off the UI thread (docs/19 设备扫描不得阻塞 UI).</summary>
+    public DeviceCatalog Devices { get; }
 
     public AudioSession Session { get; }
 

@@ -2,7 +2,37 @@
 
 面向游戏语音的可控音频面板：将选定应用的声音、导入音效和真实麦克风组合后，送入语音软件可选择的虚拟麦克风，同时提供独立本地监听。
 
+## 获取与运行
+
+**便携包（推荐）**：下载 `OnbodyMic-0.1.0-portable-x64.zip`，解压到任意可写目录，双击 `OnbodyMic.Desktop.exe`。自包含，无需安装 .NET，不写注册表、不装服务、不动音频驱动；卸载 = 删目录 + 删数据目录（默认 `%LOCALAPPDATA%\OnbodyMic`）。包内附 `开始使用.txt`、`使用说明.md`、`依赖与许可证.md`。
+
+前置条件：Steam 客户端自带的 Streaming Speakers（虚拟音频线缆）已安装——本项目不捆绑也不分发该驱动。
+
+**从源码构建**：
+
+```bat
+dotnet build OnbodyMic.sln -c Release
+dotnet test  OnbodyMic.sln -c Release
+```
+
+**重新生成便携包**（发布自包含产物 + 包内文档 + 包自检 + 打 zip）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build/build-portable.ps1
+```
+
+产物：`dist/win-x64/` 与 `dist/OnbodyMic-<版本>-portable-x64.zip`（`dist/` 不入库）。脚本会先对发布产物运行 `--selftest`（含多 DPI 布局审计），失败即中止，不会产出未经验证的包。
+
+**自检**：
+
+```bat
+OnbodyMic.Desktop.exe --selftest
+```
+
+覆盖桌面壳构建、会话状态快照，以及 96/120/144/192 DPI × 三种窗口尺寸的布局审计（无裁切、无越界、紧急按钮可见、卡片列数符合响应式规则）。
+
 ## 当前状态
+
 
 - 日期：2026-10-24。
 - 工作目录与仓库暂名：`onbody_mic`。

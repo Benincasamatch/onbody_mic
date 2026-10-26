@@ -113,11 +113,28 @@ internal static class Program
             using var tray = new NotifyIcon { Icon = System.Drawing.SystemIcons.Application, Visible = false };
             using var wizard = new FirstRunWizard(shell);
             using var settings = new DeviceSettingsForm(shell);
+            using var hotkeys = new HotkeyEditorForm(shell, null);
+            using var picker = new AppPickerForm(shell);
 
             Console.WriteLine($"selftest: restored={restored} phase={status.Phase} presets={presets.Count}");
             Console.WriteLine($"selftest: switches={status.Switches} devices={(status.Devices is null ? "none" : "configured")}");
-            Console.WriteLine("selftest: OK");
-            return 0;
+
+            var failures = LayoutAudit.Run(main);
+            foreach (var line in LayoutAudit.Report(main))
+            {
+                Console.WriteLine($"selftest: {line}");
+            }
+
+            Console.WriteLine(failures.Count == 0
+                ? "selftest: layout OK"
+                : $"selftest: layout FAIL ({failures.Count} 项)");
+            foreach (var failure in failures)
+            {
+                Console.WriteLine($"selftest: layout-problem {failure}");
+            }
+
+            Console.WriteLine(failures.Count == 0 ? "selftest: OK" : "selftest: FAIL");
+            return failures.Count == 0 ? 0 : 1;
         }
         catch (Exception ex)
         {

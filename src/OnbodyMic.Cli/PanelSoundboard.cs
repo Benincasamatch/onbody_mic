@@ -133,6 +133,70 @@ internal sealed class Soundboard : IDisposable
 
     public IReadOnlyList<HotkeyBinding> ActiveHotkeys => _dispatcher?.Active ?? [];
 
+    /// <summary>False when the hotkey backend never attached (session failed to start).</summary>
+    public bool HotkeyBackendAvailable => _dispatcher is not null;
+
+    /// <summary>Suppresses normal triggers while the editor records a gesture (emergency mute still fires).</summary>
+    public void SuspendHotkeys() => _dispatcher?.Suspend();
+
+    public void ResumeHotkeys() => _dispatcher?.Resume();
+
+    /// <summary>
+    /// Binds through the same dispatcher the CLI panel and startup restore use,
+    /// then persists to settings.json. A rejected bind changes nothing.
+    /// </summary>
+    public CommandResult BindHotkey(HotkeyBinding binding)
+    {
+        if (_dispatcher is null)
+        {
+            return CommandResult.Reject("hotkey-backend-unavailable");
+        }
+
+        var result = _dispatcher.Bind(binding);
+        if (result.Accepted)
+        {
+            PersistBinding(binding);
+        }
+
+        return result;
+    }
+
+    /// <summary>Removes a binding from the OS and from settings; absent bindings succeed (idempotent).</summary>
+    public CommandResult UnbindHotkey(HotkeyAction action, string? targetId)
+    {
+        if (_dispatcher is null)
+        {
+            return CommandResult.Reject("hotkey-backend-unavailable");
+        }
+
+        var result = _dispatcher.Unbind(action, targetId);
+        if (!result.Accepted)
+        {
+            return result;
+        }
+
+        if (action == HotkeyAction.PlayClip && targetId is not null)
+        {
+            if (_settings.Data.ClipHotkeys.Remove(targetId))
+            {
+                SaveSettings();
+            }
+        }
+        else if (action == HotkeyAction.SelectPreset && targetId is not null)
+        {
+            if (_settings.Data.PresetHotkeys.Remove(targetId))
+            {
+                SaveSettings();
+            }
+        }
+        else if (HotkeyActionNames.ToName(action) is { } storageName && _settings.Data.GlobalHotkeys.Remove(storageName))
+        {
+            SaveSettings();
+        }
+
+        return result;
+    }
+
     public void RemovePresetHotkey(string presetId)
     {
         if (_settings.Data.PresetHotkeys.Remove(presetId))
