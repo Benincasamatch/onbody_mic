@@ -4,7 +4,7 @@
 
 ## 获取与运行
 
-**便携包（推荐）**：下载 `OnbodyMic-0.1.0-portable-x64.zip`，解压到任意可写目录，双击 `OnbodyMic.Desktop.exe`。自包含，无需安装 .NET，不写注册表、不装服务、不动音频驱动；卸载 = 删目录 + 删数据目录（默认 `%LOCALAPPDATA%\OnbodyMic`）。包内附 `开始使用.txt`、`使用说明.md`、`依赖与许可证.md`。
+**便携包（推荐）**：下载 [OnbodyMic-0.1.0-portable-x64.zip](https://github.com/Benincasamatch/onbody_mic/releases/download/v0.1.0/OnbodyMic-0.1.0-portable-x64.zip)（[发布页](https://github.com/Benincasamatch/onbody_mic/releases/tag/v0.1.0)），解压到任意可写目录，双击 `OnbodyMic.Desktop.exe`。自包含，无需安装 .NET，不写注册表、不装服务、不动音频驱动；卸载 = 删目录 + 删数据目录（默认 `%LOCALAPPDATA%\OnbodyMic`）。包内附 `开始使用.txt`、`使用说明.md`、`依赖与许可证.md`。
 
 前置条件：Steam 客户端自带的 Streaming Speakers（虚拟音频线缆）已安装——本项目不捆绑也不分发该驱动。
 

@@ -124,3 +124,16 @@ CHANGELOG.md                          [未发布] 节：UI 重设计条目
 ### 上传
 
 `github.com:443` 在本机间歇性不可达（`api.github.com` 与 `ssh.github.com:443` 正常），重试后恢复。远程 `main` 在 `f448d3c`（P1），本地领先 16 个提交。
+
+### 发布（GitHub Release v0.1.0）
+
+- `git push` 初始全部失败（`Failed to connect to github.com:443`），而 `Test-NetConnection` 报端口可达——两者路径不同：系统代理 `127.0.0.1:7892` 已启用（`ProxyEnable=1`），`git` 未配代理所以直连被阻断，`Invoke-WebRequest` 默认读系统代理所以能通。**根因不是网络抖动，是代理配置缺口**。执行 `git config http.proxy https.proxy` 后推送成功（`f448d3c..a41846b`）。
+- 发布流程同样踩到编码问题：`.ps1` 内嵌中文 release body 在无 BOM 时被按 ANSI 解码，`ConvertTo-Json` 前的哈希字面量直接语法错误。改为**中文内容走独立 UTF-8 JSON 文件**、脚本只读字节发送，彻底绕开脚本编码问题。
+- Release `v0.1.0` + 资产 `OnbodyMic-0.1.0-portable-x64.zip`（50,426,401 B）已上传。
+
+| 验证项 | 结果 |
+| --- | --- |
+| 本地 ↔ 远程 SHA256 | `842a1316…d776b3` 完全一致 |
+| zip 完整性（`testzip`） | OK，291 条目 |
+| 下载后解压运行 | `--selftest` → `layout OK` / `selftest: OK` |
+| 发布状态 | `draft=false`，已 publish |
