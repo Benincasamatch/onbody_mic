@@ -8,6 +8,14 @@ using OnbodyMic.Platform.Windows;
 /// (§19: 设备扫描不能阻塞 UI 线程), so scans run on a pool thread and the
 /// result is published back on the caller's synchronization context.
 ///
+/// The catalog deliberately keeps **every** endpoint, including disabled and
+/// unplugged ones. On a clean machine the virtual capture endpoint
+/// (Steam Streaming Speakers' internal AUX) ships disabled, and an
+/// active-only list makes it invisible and unselectable — the user then has a
+/// virtual microphone that never receives audio with no way to fix it from the
+/// UI (user report: 干净机器可以启动，但没有虚拟麦克风输出). Callers filter by
+/// <see cref="AudioEndpointInfo.State"/> when they need active-only behaviour.
+///
 /// If the cross-thread call fails (the enumerator is created on the UI
 /// apartment at startup, devlog 2026-10-26 P1 constraint), the scan retries
 /// once on the calling thread instead of silently showing an empty list.
@@ -21,6 +29,7 @@ internal sealed class DeviceCatalog
 
     public DeviceCatalog(Action<string> log) => _log = log;
 
+    /// <summary>All endpoints, including disabled/unplugged ones.</summary>
     public IReadOnlyList<AudioEndpointInfo> Devices => _devices;
 
     public string? LastError => _lastError;
@@ -43,7 +52,7 @@ internal sealed class DeviceCatalog
         {
             try
             {
-                return WindowsAudioDevices.List(activeOnly: true);
+                return WindowsAudioDevices.List(activeOnly: false);
             }
             catch (Exception ex)
             {
@@ -59,7 +68,7 @@ internal sealed class DeviceCatalog
                 {
                     try
                     {
-                        list = WindowsAudioDevices.List(activeOnly: true);
+                        list = WindowsAudioDevices.List(activeOnly: false);
                     }
                     catch (Exception ex)
                     {
@@ -89,9 +98,43 @@ internal sealed class DeviceCatalog
             context is null ? TaskScheduler.Default : TaskScheduler.FromCurrentSynchronizationContext());
     }
 
+    /// <summary>Active endpoints of one flow (what a preset can actually use right now).</summary>
+    public IReadOnlyList<AudioEndpointInfo> Active(bool capture) =>
+        ForFlow(capture).Where(IsActive).ToList();
+
+    /// <summary>Every endpoint of one flow, including disabled/unplugged ones.</summary>
     public IReadOnlyList<AudioEndpointInfo> ForFlow(bool capture) =>
         _devices.Where(d => d.DataFlow == (capture ? "Capture" : "Render")).ToList();
 
-    public string? FriendlyName(string? id) =>
-        id is null ? null : _devices.FirstOrDefault(d => d.Id == id)?.FriendlyName;
+    public AudioEndpointInfo? Find(string? id) =>
+        id is null ? null : _devices.FirstOrDefault(d => d.Id == id);
+
+    public string? FriendlyName(string? id) => Find(id)?.FriendlyName;
+
+    /// <summary>True when the endpoint exists and Windows reports it Active.</summary>
+    public bool IsAvailable(string? id) => Find(id) is { } device && IsActive(device);
+
+    public static bool IsActive(AudioEndpointInfo device) => device.State == "Active";
+
+    /// <summary>
+    /// Enables a disabled endpoint through IPolicyConfig, then rescans so every
+    /// surface sees the new state. Returns false with a reason on failure —
+    /// callers must show it rather than assume the device became usable.
+    /// </summary>
+    public bool TryEnable(string endpointId, out string? error)
+    {
+        try
+        {
+            WindowsEndpointControl.SetEnabled(endpointId, enabled: true);
+            error = null;
+            _log($"[devices] 已启用端点 {endpointId}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            _log($"[devices] 启用端点失败 {endpointId}: {ex.GetType().Name}: {ex.Message}");
+            return false;
+        }
+    }
 }

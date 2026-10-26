@@ -51,9 +51,12 @@
 
 ## 4. 首次配置
 
-1. **启用虚拟端点**（一次性）：管理员或普通权限运行：
+1. **启用虚拟端点**（一次性）。**现在可以直接在界面里做**：主窗口「设备设置…」→ 点「启用选中端点」→ 保存。
+   若主窗口顶部出现「虚拟麦 Capture 已禁用」提示，说明正是这个原因，按提示点进去启用即可。
+   也可以命令行运行：
    - `OnbodyMic.Cli.exe devices --all --ids` 找到「内部 AUX 插座 (Steam Streaming Speakers)」的 capture 端点 ID；
    - 若状态不是 Active：`OnbodyMic.Cli.exe enable --id <端点ID>` 启用。
+   - `devices` 默认只列可用端点；`devices --all` 才会列出被禁用的端点（干净机器上虚拟麦端点默认是禁用的）。
 2. 运行 `OnbodyMic.Desktop.exe`，首次引导向导依次确认：
    - 真实麦克风（具体设备，不是"默认设备"）；
    - 虚拟输出（Steam 线缆 Render 端点）；

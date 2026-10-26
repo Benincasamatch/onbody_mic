@@ -137,3 +137,55 @@ CHANGELOG.md                          [未发布] 节：UI 重设计条目
 | zip 完整性（`testzip`） | OK，291 条目 |
 | 下载后解压运行 | `--selftest` → `layout OK` / `selftest: OK` |
 | 发布状态 | `draft=false`，已 publish |
+
+---
+
+## 第四轮：干净机器「没有虚拟麦克风输出」（用户实测报告）
+
+### 症状与根因
+
+用户报告：干净机器上程序能启动，但队友端收不到声音。
+
+**根因不是音频引擎，是端点可见性。** 干净机器上 Steam Streaming Speakers 的虚拟麦 Capture 端点默认状态是 `Disabled`。而所有 UI 路径都在用 `WindowsAudioDevices.List(activeOnly: true)`：
+
+| 位置 | 后果 |
+| --- | --- |
+| `DeviceCatalog`（主窗/设备设置共享） | 禁用端点不进列表 |
+| `FirstRunWizard.Fill` | 首跑向导里根本选不到虚拟麦 |
+| `DeviceSettingsForm.LoadDevicesAsync` | 设置页也看不到，无法启用 |
+| `AppShell.ValidateDevices` | 把它判为 `endpoint-missing`，提示「未检测到」——误导用户去找驱动 |
+
+即：用户有一个"存在但被禁用"的虚拟麦克风，而界面既不显示、也不提示、也无法启用。文档里写的 `enable --id` 是唯一出路，但那是命令行操作。
+
+### 修复
+
+1. `DeviceCatalog` 保留全部端点（`activeOnly: false`），新增 `IsActive`/`IsAvailable`/`Find`/`TryEnable`；调用方按 `State` 自行过滤。
+2. `DeviceSettingsForm` 新增**「启用选中端点」**：走 `WindowsEndpointControl.SetEnabled`（IPolicyConfig，与声音设置同一调用），启用后重扫并刷新共享 catalog。端点在下拉框标注「已禁用 — 选中后点「启用选中端点」」。
+3. `FirstRunWizard` 列出禁用端点但**绝不预选**（否则会建出静默失效的预设），标签标注「已禁用」。
+4. 主窗口顶部新增明确诊断，直接点名症状与处理入口：
+   `虚拟麦 Capture 已禁用（内部 AUX 插座）：队友端收不到声音。处理：打开「设备设置…」，选中该端点后点「启用选中端点」。`
+5. `ValidateDevices` 区分 `endpoint-disabled`（可启用）与 `endpoint-missing`（驱动缺失）。
+6. 修复 CLI `devices` 参数语义反转：`--all` 曾等价于「仅可用端点」，与文档相反。
+
+### 实测（本机真实复现）
+
+用 `OnbodyMic.Cli.exe disable --id <AUX>` 把本机 AUX Capture 置为 `Disabled`，真实复现干净机器状态，然后逐项验证：
+
+| 项 | 结果 |
+| --- | --- |
+| 主窗口诊断 | 截图确认顶部显示「虚拟麦 Capture 已禁用（内部 AUX 插座）…队友端收不到声音」+ 处理路径 |
+| 预设校验日志 | `失效: VirtualCapture:endpoint-disabled`（修复前是误导性的 `endpoint-missing`） |
+| IPolicyConfig 启用 | `enable --id` → 状态 `Disabled → Active` 实测成功 |
+| 端点恢复 | 测试后已把本机 AUX 恢复为 Active |
+| 全量测试 | 181/181 通过 |
+| 布局审计 | 扩展到**对话框**（首次引导/设备设置/热键设置）× 4 档 DPI，全部通过 |
+
+### 顺带修掉的三个真实缺陷（审计发现，肉眼截图漏掉）
+
+1. **首跑向导裁切**：固定 560px 宽 + 固定 320px 下拉框 → 端点全名被截、底部按钮被裁。改为可缩放 680×480、标签列 AutoSize、按钮按令牌给最小宽度。
+2. **首跑向导单元格错位**：`layout.Controls.Add(...)` 不指定行列，表格按添加顺序分配单元格，导致「预设名称」标签与输入框分处两行。改为显式 `(column, row)` 定位 + 末尾 100% 弹性行吸收多余高度。
+3. **热键设置底部溢出**：外层表格给编辑卡片固定 190px 行高，加了内边距后操作行与状态文字溢出父容器。改为 AutoSize 行 + 窗口 680×560。
+
+### 教训
+
+「能启动」不等于「能用」。这轮的缺陷全部属于**沉默失败**：端点被过滤后，UI 不报错、不提示、按钮可点但无效果。审计只覆盖主窗口时完全看不到；把对话框纳入审计后，一次就抓出三处裁切。

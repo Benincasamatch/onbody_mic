@@ -868,9 +868,7 @@ internal sealed class MainForm : Form
         var mic = status.Devices;
         _micCard.SetDescription(mic is null || string.IsNullOrEmpty(mic.MicDeviceId)
             ? "输入：未配置（在「设备设置…」中选择）"
-            : MicAvailable(status)
-                ? $"输入：{_shell.Devices.FriendlyName(mic.MicDeviceId) ?? mic.MicDeviceId}"
-                : "输入：设备不可用（未检测到）");
+            : EndpointDescription("输入", mic.MicDeviceId));
         _micCard.SetStatus(
             status.EmergencyLatched ? "锁存" :
             !MicAvailable(status) ? "设备不可用" :
@@ -891,7 +889,7 @@ internal sealed class MainForm : Form
         var monitorDevice = status.Devices?.MonitorDeviceId;
         _monitorCard.SetDescription(string.IsNullOrEmpty(monitorDevice)
             ? "监听设备：未配置（在「设备设置…」中选择）"
-            : $"监听设备：{_shell.Devices.FriendlyName(monitorDevice) ?? "不可用（未检测到）"}");
+            : EndpointDescription("监听设备", monitorDevice));
         _monitorCard.SetStatus(
             status.EmergencyLatched ? "锁存" :
             status.MonitorSuspendedForPreview ? "试听中暂停" :
@@ -1769,16 +1767,34 @@ internal sealed class MainForm : Form
 
     private static string IssueLabel(string reason) => reason switch
     {
-        "endpoint-missing" => "端点不存在或未启用",
+        "endpoint-missing" => "端点不存在（驱动可能未安装）",
+        "endpoint-disabled" => "端点已被禁用（可在「设备设置…」启用）",
         "executable-missing" => "应用路径不存在",
         "attach-failed" => "输出接入失败（可能被独占）",
         _ => reason,
     };
 
+    /// <summary>
+    /// Endpoint text that distinguishes the three states a user must be able to
+    /// tell apart: present and active, present but disabled (fixable in 设备设置),
+    /// and gone entirely (re-select it).
+    /// </summary>
+    private string EndpointDescription(string prefix, string endpointId)
+    {
+        if (_shell.Devices.Find(endpointId) is not { } endpoint)
+        {
+            return $"{prefix}：设备不存在（未检测到，请在「设备设置…」重新选择）";
+        }
+
+        return DeviceCatalog.IsActive(endpoint)
+            ? $"{prefix}：{endpoint.FriendlyName}"
+            : $"{prefix}：{endpoint.FriendlyName}（已禁用 — 在「设备设置…」中启用）";
+    }
+
     private bool MicAvailable(SessionStatus status) =>
         status.Devices is { } devices
         && !string.IsNullOrEmpty(devices.MicDeviceId)
-        && _shell.Devices.Devices.Any(d => d.Id == devices.MicDeviceId);
+        && _shell.Devices.IsAvailable(devices.MicDeviceId);
 
     private void UpdatePhaseChip(SessionStatus status)
     {
@@ -1815,7 +1831,7 @@ internal sealed class MainForm : Form
         }
     }
 
-    private static string DescribeIssues(SessionStatus status)
+    private string DescribeIssues(SessionStatus status)
     {
         if (status.EmergencyLatched)
         {
@@ -1827,11 +1843,35 @@ internal sealed class MainForm : Form
             return "虚拟输出已失效：发送全部关闭。处理：打开「设备设置…」确认端点后保存重新应用。";
         }
 
+        if (status.Devices is null)
+        {
+            return "设备未配置：点击「设备设置…」选择麦克风、虚拟输出与监听设备。";
+        }
+
+        // A disabled or missing virtual capture endpoint is the reason the voice
+        // app receives nothing: the virtual microphone exists but never carries
+        // audio. Report it explicitly instead of a generic "校验未通过".
+        if (string.IsNullOrEmpty(status.Devices.VirtualCaptureDeviceId))
+        {
+            return "虚拟麦 Capture 未配置：队友端（KOOK 等）将收不到任何声音。"
+                + "处理：打开「设备设置…」选择虚拟麦 Capture 端点；若显示「已禁用」，选中后点「启用选中端点」。";
+        }
+
+        if (_shell.Devices.Find(status.Devices.VirtualCaptureDeviceId) is not { } captureEndpoint)
+        {
+            return "虚拟麦 Capture 端点不存在：驱动可能未安装或被移除。"
+                + "处理：确认 Steam Streaming Speakers 已安装，然后在「设备设置…」重新选择。";
+        }
+
+        if (!DeviceCatalog.IsActive(captureEndpoint))
+        {
+            return $"虚拟麦 Capture 已禁用（{captureEndpoint.FriendlyName}）：队友端收不到声音。"
+                + "处理：打开「设备设置…」，选中该端点后点「启用选中端点」。";
+        }
+
         if (!status.DevicesValidated)
         {
-            return status.Devices is null
-                ? "设备未配置：点击「设备设置…」选择麦克风、虚拟输出与监听设备。"
-                : "设备校验未通过：部分端点缺失，点击「设备设置…」重新选择。";
+            return "设备校验未通过：部分端点缺失，点击「设备设置…」重新选择。";
         }
 
         return "";

@@ -18,7 +18,10 @@ internal static class Program
             Console.OutputEncoding = Encoding.UTF8;
             return args.Length == 0 ? Usage() : args[0] switch
             {
-                "devices" => ListDevices(args.Skip(1).Contains("--all"), args.Skip(1).Contains("--ids")),
+                // --all includes disabled/unplugged endpoints (needed to find and
+                // enable the virtual capture endpoint on a clean machine);
+                // without it only active endpoints are listed
+                "devices" => ListDevices(!args.Skip(1).Contains("--all"), args.Skip(1).Contains("--ids")),
                 "enable" => SetEnabled(args[1..], true),
                 "disable" => SetEnabled(args[1..], false),
                 "setformat" => SetFormat(args[1..]),

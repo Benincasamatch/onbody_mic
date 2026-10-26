@@ -13,10 +13,10 @@ internal sealed class FirstRunWizard : Form
 {
     private readonly AppShell _shell;
 
-    private readonly ComboBox _micCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 320 };
-    private readonly ComboBox _renderCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 320 };
-    private readonly ComboBox _cableCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 320 };
-    private readonly ComboBox _monitorCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 320 };
+    private readonly ComboBox _micCombo = Theme.DropDown();
+    private readonly ComboBox _renderCombo = Theme.DropDown();
+    private readonly ComboBox _cableCombo = Theme.DropDown();
+    private readonly ComboBox _monitorCombo = Theme.DropDown();
     private readonly ComboBox _monitorMode = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 160 };
     private readonly TextBox _nameBox = new() { Text = "开黑默认", Width = 200 };
     private readonly Button _okButton = new() { Text = "创建并应用预设" };
@@ -28,46 +28,85 @@ internal sealed class FirstRunWizard : Form
         Text = "随声麦 · 首次引导";
         Font = new Font("Microsoft YaHei UI", 9f);
         AutoScaleMode = AutoScaleMode.Dpi;
-        FormBorderStyle = FormBorderStyle.FixedDialog;
+        // Resizable, and wide enough for real endpoint names: the fixed 560px
+        // dialog clipped both the combo text and the bottom buttons.
+        FormBorderStyle = FormBorderStyle.SizableToolWindow;
         MaximizeBox = false;
         MinimizeBox = false;
-        AutoSize = true;
-        AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        AutoSize = false;
         StartPosition = FormStartPosition.CenterParent;
-        ClientSize = new Size(560, 430);
+        ClientSize = Theme.DS(680, 480);
+        MinimumSize = Theme.DS(600, 440);
         ShowInTaskbar = false;
 
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 2, AutoSize = true };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170));
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Padding = Theme.DP(Theme.GapMedium),
+            ColumnCount = 2,
+        };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
 
-        layout.Controls.Add(new Label { Text = "真实麦克风", AutoSize = true, Margin = new Padding(4, 10, 4, 0) });
+        // Explicit row/column placement: Controls.Add without a cell lets the
+        // table pick cells in add order, which scrambled the dialog.
+        var row = 0;
+        void Field(string label, Control input)
+        {
+            layout.RowCount = row + 1;
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.Controls.Add(new Label
+            {
+                Text = label,
+                AutoSize = true,
+                Anchor = AnchorStyles.Left,
+                Margin = Theme.DP(0, 0, Theme.GapMedium, Theme.GapSmall),
+            }, 0, row);
+            input.Dock = DockStyle.Fill;
+            input.Margin = Theme.DP(0, 0, 0, Theme.GapSmall);
+            layout.Controls.Add(input, 1, row);
+            row++;
+        }
+
         Fill(_micCombo, capture: true, preferred: "麦克风");
-        layout.Controls.Add(_micCombo);
-        layout.Controls.Add(new Label { Text = "虚拟输出（线缆 Render，独占写入）", AutoSize = true, Margin = new Padding(4, 10, 4, 0) });
+        Field("真实麦克风", _micCombo);
         Fill(_renderCombo, capture: false, preferred: "Steam");
-        layout.Controls.Add(_renderCombo);
-        layout.Controls.Add(new Label { Text = "虚拟麦 Capture（实际端点监听用，可暂空）", AutoSize = true, Margin = new Padding(4, 10, 4, 0) });
+        Field("虚拟输出（线缆 Render，独占写入）", _renderCombo);
         Fill(_cableCombo, capture: true, preferred: "Steam", optional: "（暂不配置）");
-        layout.Controls.Add(_cableCombo);
-        layout.Controls.Add(new Label { Text = "监听输出（耳机）", AutoSize = true, Margin = new Padding(4, 10, 4, 0) });
+        Field("虚拟麦 Capture（实际端点监听用，可暂空）", _cableCombo);
         Fill(_monitorCombo, capture: false, preferred: null);
-        layout.Controls.Add(_monitorCombo);
-        layout.Controls.Add(new Label { Text = "监听偏好（开启状态不会被恢复）", AutoSize = true, Margin = new Padding(4, 10, 4, 0) });
+        Field("监听输出（耳机）", _monitorCombo);
         _monitorMode.Items.AddRange(["仅音效", "实际虚拟麦"]);
         _monitorMode.SelectedIndex = 0;
-        layout.Controls.Add(_monitorMode);
-        layout.Controls.Add(new Label { Text = "预设名称", AutoSize = true, Margin = new Padding(4, 10, 4, 0) });
-        layout.Controls.Add(_nameBox);
+        Field("监听偏好（开启状态不会被恢复）", _monitorMode);
+        Field("预设名称", _nameBox);
+
+        // Trailing 100% row absorbs the dialog's extra height. Without it the
+        // last field's row is stretched and its label drifts away from the input.
+        layout.RowCount = row + 1;
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
         var note = new Label
         {
             Dock = DockStyle.Bottom,
-            Height = 70,
+            AutoSize = false,
+            Height = Theme.D(56),
+            ForeColor = Theme.TextSecondary,
             Text = "提示：在 KOOK 中手动把输入设备选为该虚拟麦的录音端点；不要把虚拟线设为系统默认播放设备。\n"
                 + "创建后所有发送与监听保持关闭，由你在主窗口或热键逐路开启。",
         };
-        var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, FlowDirection = FlowDirection.RightToLeft, AutoSize = true };
+        var buttons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Bottom,
+            FlowDirection = FlowDirection.RightToLeft,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            WrapContents = false,
+            Padding = Theme.DP(Theme.GapMedium, Theme.GapSmall, Theme.GapMedium, Theme.GapMedium),
+        };
+        _skipButton.Margin = Theme.DP(0, 0, Theme.GapSmall, 0);
+        _skipButton.MinimumSize = new Size(Theme.D(150), Theme.D(Theme.ControlHeight));
+        _okButton.MinimumSize = new Size(Theme.D(150), Theme.D(Theme.ControlHeight));
         buttons.Controls.Add(_okButton);
         buttons.Controls.Add(_skipButton);
 
@@ -82,14 +121,27 @@ internal sealed class FirstRunWizard : Form
     {
         combo.Items.Clear();
         var defaultId = WindowsAudioDevices.DefaultDeviceId(capture);
-        var endpoints = WindowsAudioDevices.List(activeOnly: true)
+
+        // Include disabled endpoints: on a clean machine the Steam virtual capture
+        // endpoint ships disabled, and an active-only list leaves the user with no
+        // selectable virtual microphone (user report: 没有虚拟麦克风输出).
+        var endpoints = WindowsAudioDevices.List(activeOnly: false)
             .Where(d => d.DataFlow == (capture ? "Capture" : "Render"))
             .ToList();
         var preferredIndex = -1;
         foreach (var endpoint in endpoints)
         {
             var isDefault = endpoint.Id == defaultId;
-            combo.Items.Add(new EndpointRow(endpoint, isDefault));
+            var active = endpoint.State == "Active";
+            combo.Items.Add(new EndpointRow(endpoint, isDefault, active));
+
+            // a disabled endpoint must never be pre-selected: it would create a
+            // preset that silently cannot work
+            if (!active)
+            {
+                continue;
+            }
+
             if (preferred is not null && endpoint.FriendlyName.Contains(preferred, StringComparison.OrdinalIgnoreCase)
                 && preferredIndex < 0)
             {
@@ -157,10 +209,15 @@ internal sealed class FirstRunWizard : Form
         Close();
     }
 
-    private sealed record EndpointRow(AudioEndpointInfo Endpoint, bool IsDefault)
+    private sealed record EndpointRow(AudioEndpointInfo Endpoint, bool IsDefault, bool Active)
     {
-        public override string ToString() => IsDefault
-            ? $"{Endpoint.FriendlyName}（当前系统默认）"
-            : Endpoint.FriendlyName;
+        public bool Disabled => !Active;
+
+        public override string ToString() => (IsDefault, Disabled) switch
+        {
+            (true, false) => $"{Endpoint.FriendlyName}（当前系统默认）",
+            (false, true) => $"{Endpoint.FriendlyName}（已禁用 — 创建后到「设备设置…」启用）",
+            _ => Endpoint.FriendlyName,
+        };
     }
 }

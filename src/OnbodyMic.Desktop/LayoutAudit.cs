@@ -25,6 +25,7 @@ internal static class LayoutAudit
     {
         var failures = new List<string>(SelfCheck());
         var shell = ShellOf(template);
+        failures.AddRange(RunDialogs(shell));
         foreach (var dpi in Dpis)
         {
             foreach (var (widthDip, heightDip, label) in Sizes)
@@ -62,12 +63,67 @@ internal static class LayoutAudit
         return failures;
     }
 
+    /// <summary>
+    /// The dialogs are audited too: the first-run wizard shipped clipped combo
+    /// text and a cut-off primary button on a clean machine, which a main-window
+    /// -only audit cannot see.
+    /// </summary>
+    private static IReadOnlyList<string> RunDialogs(AppShell shell)
+    {
+        var failures = new List<string>();
+        foreach (var dpi in Dpis)
+        {
+            Theme.UseDpi(dpi);
+            var prefix = $"{dpi / 96.0:0.##}x";
+
+            using (var wizard = new FirstRunWizard(shell) { StartPosition = FormStartPosition.Manual, Location = new Point(-32000, -32000), ShowInTaskbar = false })
+            {
+                wizard.Show();
+                wizard.PerformLayout();
+                foreach (var problem in Problems(wizard))
+                {
+                    failures.Add($"{prefix} 首次引导: {problem}");
+                }
+
+                wizard.Hide();
+            }
+
+            using (var settings = new DeviceSettingsForm(shell) { StartPosition = FormStartPosition.Manual, Location = new Point(-32000, -32000), ShowInTaskbar = false })
+            {
+                settings.Show();
+                settings.PerformLayout();
+                foreach (var problem in Problems(settings))
+                {
+                    failures.Add($"{prefix} 设备设置: {problem}");
+                }
+
+                settings.Hide();
+            }
+
+            using (var hotkeys = new HotkeyEditorForm(shell, null) { StartPosition = FormStartPosition.Manual, Location = new Point(-32000, -32000), ShowInTaskbar = false })
+            {
+                hotkeys.Show();
+                hotkeys.PerformLayout();
+                foreach (var problem in Problems(hotkeys))
+                {
+                    failures.Add($"{prefix} 热键设置: {problem}");
+                }
+
+                hotkeys.Hide();
+            }
+        }
+
+        Theme.UseDpi(96);
+        return failures;
+    }
+
     public static IReadOnlyList<string> Report(MainForm template)
     {
         return
         [
             $"layout: 审计 DPI {string.Join("/", Dpis.Select(d => $"{d}({d / 96.0:0.##}x)"))} × 尺寸 "
-            + string.Join("/", Sizes.Select(s => $"{s.WidthDip}×{s.HeightDip}")),
+            + string.Join("/", Sizes.Select(s => $"{s.WidthDip}×{s.HeightDip}"))
+            + "；对话框：首次引导/设备设置/热键设置",
         ];
     }
 

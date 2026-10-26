@@ -24,6 +24,7 @@ internal sealed class DeviceSettingsForm : Form
     private readonly Button _saveButton;
     private readonly Button _cancelButton;
     private readonly Button _refreshButton;
+    private readonly Button _enableButton;
     private readonly Label _status;
     private IReadOnlyList<AudioEndpointInfo> _devices = [];
     private bool _busy;
@@ -50,6 +51,13 @@ internal sealed class DeviceSettingsForm : Form
         _refreshButton = Theme.SecondaryButton("刷新设备");
         _refreshButton.Click += async (_, _) => await LoadDevicesAsync();
         _refreshButton.Margin = Theme.DP(Theme.GapSmall, 0, 0, 0);
+
+        // A disabled endpoint cannot be used, and on a clean machine the virtual
+        // capture endpoint starts disabled — without this the user can only fix it
+        // from the command line (user report: 没有虚拟麦克风输出).
+        _enableButton = Theme.SecondaryButton("启用选中端点");
+        _enableButton.Click += async (_, _) => await EnableSelectedAsync();
+        _enableButton.Margin = Theme.DP(Theme.GapSmall, 0, 0, 0);
 
         _status = new Label
         {
@@ -118,7 +126,7 @@ internal sealed class DeviceSettingsForm : Form
             WrapContents = true,
             Margin = new Padding(0),
         };
-        buttons.Controls.AddRange([_saveButton, _cancelButton, _refreshButton]);
+        buttons.Controls.AddRange([_saveButton, _cancelButton, _refreshButton, _enableButton]);
 
         root.Controls.Add(card, 0, 0);
         root.Controls.Add(new Panel { Dock = DockStyle.Fill }, 0, 1);
@@ -177,7 +185,10 @@ internal sealed class DeviceSettingsForm : Form
         try
         {
             var current = _shell.Session.Status().Devices;
-            var devices = await Task.Run(() => WindowsAudioDevices.List(activeOnly: true));
+
+            // include disabled endpoints: on a clean machine the virtual capture
+            // endpoint is disabled and must still be selectable (and enableable)
+            var devices = await Task.Run(() => WindowsAudioDevices.List(activeOnly: false));
             _devices = devices;
             Fill(_micCombo, capture: true, current?.MicDeviceId, allowEmpty: false);
             Fill(_renderCombo, capture: false, current?.VirtualRenderDeviceId, allowEmpty: false);
@@ -186,13 +197,16 @@ internal sealed class DeviceSettingsForm : Form
 
             var missing = new[] { current?.MicDeviceId, current?.VirtualRenderDeviceId, current?.MonitorDeviceId }
                 .Count(id => id is not null && devices.All(d => d.Id != id));
-            SetStatus(
-                devices.Count == 0
-                    ? "未检测到任何音频端点：确认声卡/线缆驱动正常后点「刷新设备」。"
-                    : missing == 0
-                        ? $"已发现 {devices.Count} 个端点。"
-                        : $"已发现 {devices.Count} 个端点，但预设中有 {missing} 个端点已不存在（已标为「缺失」）。",
-                missing == 0 ? Theme.TextSecondary : Theme.Warning);
+            var disabled = devices.Count(d => d.State != "Active" && d.State != "NotPresent");
+            var active = devices.Count(d => d.State == "Active");
+            var text = devices.Count == 0
+                ? "未检测到任何音频端点：确认声卡/线缆驱动正常后点「刷新设备」。"
+                : missing > 0
+                    ? $"已发现 {devices.Count} 个端点（{active} 个可用），但预设中有 {missing} 个端点已不存在。"
+                    : disabled > 0
+                        ? $"已发现 {devices.Count} 个端点，其中 {disabled} 个被禁用（标为「已禁用」，选中后点「启用选中端点」）。"
+                        : $"已发现 {devices.Count} 个端点，全部可用。";
+            SetStatus(text, missing > 0 || disabled > 0 ? Theme.Warning : Theme.TextSecondary);
         }
         catch (Exception ex)
         {
@@ -202,6 +216,89 @@ internal sealed class DeviceSettingsForm : Form
         {
             _busy = false;
             _refreshButton.Enabled = true;
+            _saveButton.Enabled = true;
+        }
+    }
+
+    /// <summary>
+    /// Enables whichever disabled endpoint the user picked in any of the four
+    /// lists, then rescans. The endpoint is enabled through IPolicyConfig (the
+    /// same call 声音设置 uses); the result is reported, never assumed.
+    /// </summary>
+    private async Task EnableSelectedAsync()
+    {
+        // Enable every disabled endpoint the dialog currently knows about. The
+        // button used to require a selection in a combo box, so a user who only
+        // opened the dialog got a status line and nothing happened — the virtual
+        // microphone stayed dead.
+        var targets = _devices
+            .Where(d => d.State != "Active" && d.State != "NotPresent")
+            .GroupBy(d => d.Id)
+            .Select(g => g.First())
+            .ToList();
+
+        if (targets.Count == 0)
+        {
+            SetStatus("没有需要启用的端点（列表中的端点都可用）。", Theme.TextSecondary);
+            return;
+        }
+
+        if (_busy)
+        {
+            return;
+        }
+
+        _busy = true;
+        _enableButton.Enabled = false;
+        _saveButton.Enabled = false;
+        try
+        {
+            var enabled = new List<string>();
+            var failed = new List<string>();
+            foreach (var target in targets)
+            {
+                SetStatus($"正在启用「{target.FriendlyName}」…", Theme.TextSecondary);
+                var ok = await Task.Run(() =>
+                {
+                    try
+                    {
+                        WindowsEndpointControl.SetEnabled(target.Id, enabled: true);
+                        return true;
+                    }
+                    catch (Exception ex)
+                    {
+                        _shell.Log($"[devices] 启用端点失败 {target.Id}: {ex.GetType().Name}: {ex.Message}");
+                        return false;
+                    }
+                });
+
+                if (ok)
+                {
+                    enabled.Add(target.FriendlyName);
+                }
+                else
+                {
+                    failed.Add(target.FriendlyName);
+                }
+            }
+
+            await LoadDevicesAsync();
+            _shell.Devices.RefreshAsync();
+
+            var text = enabled.Count > 0
+                ? $"已启用 {string.Join("、", enabled)}。"
+                : "未能启用任何端点。";
+            if (failed.Count > 0)
+            {
+                text += $"\n失败：{string.Join("、", failed)}（该端点可能属于其他用户或驱动不支持启用）。";
+            }
+
+            SetStatus(text, failed.Count == 0 ? Theme.Success : Theme.Error);
+        }
+        finally
+        {
+            _busy = false;
+            _enableButton.Enabled = true;
             _saveButton.Enabled = true;
         }
     }
@@ -304,6 +401,7 @@ internal sealed class DeviceSettingsForm : Form
                 "设备设置", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
+        _shell.Devices.RefreshAsync();
         DialogResult = DialogResult.OK;
         Close();
     }
@@ -316,8 +414,13 @@ internal sealed class DeviceSettingsForm : Form
 
     private sealed record EndpointRow(AudioEndpointInfo Endpoint, bool Missing)
     {
+        /// <summary>True when Windows reports the endpoint disabled/unplugged: selectable, but not usable until enabled.</summary>
+        public bool Disabled => !Missing && Endpoint.State != "Active";
+
         public override string ToString() => Missing
             ? $"{Endpoint.FriendlyName}（未检测到）"
-            : Endpoint.FriendlyName;
+            : Disabled
+                ? $"{Endpoint.FriendlyName}（已禁用 — 选中后点「启用选中端点」）"
+                : Endpoint.FriendlyName;
     }
 }

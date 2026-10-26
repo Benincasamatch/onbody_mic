@@ -47,8 +47,8 @@ internal sealed class HotkeyEditorForm : Form
         ShowInTaskbar = false;
         MinimizeBox = false;
         BackColor = Theme.WindowBack;
-        ClientSize = Theme.DS(620, 460);
-        MinimumSize = Theme.DS(520, 380);
+        ClientSize = Theme.DS(680, 560);
+        MinimumSize = Theme.DS(600, 480);
 
         _recordButton = Theme.SecondaryButton("录制…");
         _bindButton = Theme.PrimaryButton("绑定");
@@ -74,13 +74,13 @@ internal sealed class HotkeyEditorForm : Form
         };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, Theme.D(190)));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         var editor = Theme.Card(
             new ColumnStyle(SizeType.Absolute, Theme.D(Theme.LabelColumnWidth)),
             new ColumnStyle(SizeType.Percent, 100f));
-        editor.Dock = DockStyle.Fill;
+        editor.Dock = DockStyle.Top;
         editor.Paint += Theme.CardBorder;
         editor.Margin = new Padding(0, 0, 0, Theme.D(Theme.GapMedium));
         _editor = editor;

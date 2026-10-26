@@ -77,31 +77,34 @@ internal sealed class AppShell : IDisposable
         return false;
     }
 
-    /// <summary>Live-endpoint validation (B05): missing devices become visible route issues, never substitutions.</summary>
+    /// <summary>
+    /// Live-endpoint validation (B05): missing devices become visible route
+    /// issues, never substitutions. A *disabled* endpoint is reported separately
+    /// from a missing one — it exists and can be enabled from 设备设置, and
+    /// calling it "missing" sends the user looking for a driver they already have
+    /// (user report: 干净机器没有虚拟麦克风输出).
+    /// </summary>
     private IReadOnlyList<RouteIssue> ValidateDevices(PresetDeviceConfig config)
     {
         var issues = new List<RouteIssue>();
-        var activeIds = WindowsAudioDevices.List(activeOnly: true).Select(d => d.Id).ToHashSet(StringComparer.Ordinal);
+        var all = WindowsAudioDevices.List(activeOnly: false);
+        var activeIds = all.Where(d => d.State == "Active").Select(d => d.Id).ToHashSet(StringComparer.Ordinal);
+        var presentIds = all.Select(d => d.Id).ToHashSet(StringComparer.Ordinal);
 
-        if (!activeIds.Contains(config.MicDeviceId))
+        void Check(string? id, PresetRoute route)
         {
-            issues.Add(new RouteIssue(PresetRoute.Microphone, "endpoint-missing"));
+            if (string.IsNullOrEmpty(id) || activeIds.Contains(id))
+            {
+                return;
+            }
+
+            issues.Add(new RouteIssue(route, presentIds.Contains(id) ? "endpoint-disabled" : "endpoint-missing"));
         }
 
-        if (!activeIds.Contains(config.VirtualRenderDeviceId))
-        {
-            issues.Add(new RouteIssue(PresetRoute.VirtualOutput, "endpoint-missing"));
-        }
-
-        if (config.VirtualCaptureDeviceId is { } cable && !activeIds.Contains(cable))
-        {
-            issues.Add(new RouteIssue(PresetRoute.VirtualCapture, "endpoint-missing"));
-        }
-
-        if (!activeIds.Contains(config.MonitorDeviceId))
-        {
-            issues.Add(new RouteIssue(PresetRoute.Monitor, "endpoint-missing"));
-        }
+        Check(config.MicDeviceId, PresetRoute.Microphone);
+        Check(config.VirtualRenderDeviceId, PresetRoute.VirtualOutput);
+        Check(config.VirtualCaptureDeviceId, PresetRoute.VirtualCapture);
+        Check(config.MonitorDeviceId, PresetRoute.Monitor);
 
         if (config.Application is { IsBound: true } app
             && app.ExecutablePath is { } path
