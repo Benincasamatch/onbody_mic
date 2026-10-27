@@ -41,8 +41,13 @@ internal static class LayoutAudit
                 // child Visible stays false until the form is shown, so a
                 // hidden form would make every structural check pass silently
                 form.Show();
+                if (dpi == 96 && widthDip == 1000)
+                {
+                    SmokeShots.Capture(form, "top.png");
+                    SmokeShots.Capture(form, "scrolled.png");
+                }
+
                 form.Size = new Size(Theme.D(widthDip), Theme.D(heightDip));
-                form.PerformLayout();
 
                 var prefix = $"{dpi / 96.0:0.##}x {label}({widthDip}×{heightDip})";
                 foreach (var problem in Problems(form))

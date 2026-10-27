@@ -2,6 +2,7 @@ namespace OnbodyMic.Desktop;
 
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Text;
 using OnbodyMic.Application;
 using OnbodyMic.Audio;
 using OnbodyMic.Domain;
@@ -48,11 +49,12 @@ internal sealed class MainForm : Form
     private Label _dirtyLabel = null!;
     private ContextMenuStrip _presetMenu = null!;
 
-    // §7 status summary
-    private Label _phaseChip = null!;
+    // §7 status summary (docs/09 §A1: big status bar + four route chips)
+    private Label _statusLamp = null!;
+    private Label _statusHeadline = null!;
+    private Label _statusSubline = null!;
     private Label _micChip = null!;
     private Label _extrasChip = null!;
-    private Label _appChip = null!;
     private Label _monitorChip = null!;
     private Label _clipChip = null!;
     private Label _issueLabel = null!;
@@ -63,29 +65,36 @@ internal sealed class MainForm : Form
     private RouteCard _extrasCard = null!;
     private RouteCard _monitorCard = null!;
     private RouteCard _clipCard = null!;
-    private CheckBox _micCheck = null!;
-    private NumericUpDown _micGain = null!;
-    private CheckBox _extrasCheck = null!;
-    private CheckBox _appCheck = null!;
-    private NumericUpDown _appGain = null!;
+    private ToggleSwitch _micCheck = null!;
+    private TrackBar _micGain = null!;
+    private Label _micGainLabel = null!;
+    private LevelMeter _micMeter = null!;
+    private Label _micLevelText = null!;
+    private ToggleSwitch _extrasCheck = null!;
+    private ToggleSwitch _appCheck = null!;
+    private TrackBar _appGain = null!;
+    private Label _appGainLabel = null!;
     private Button _bindAppButton = null!;
     private ComboBox _monitorCombo = null!;
     private TrackBar _monitorVolume = null!;
-    private NumericUpDown _monitorGain = null!;
+    private Label _monitorVolumeLabel = null!;
     private Button _stopButton = null!;
-    private NumericUpDown _clipGain = null!;
+    private TrackBar _clipGain = null!;
+    private Label _clipGainLabel = null!;
+    private LevelMeter _clipMeter = null!;
+    private Label _clipLevelText = null!;
     private bool _twoColumnRoutes = true;
 
-    // §9 sound library
+    // §9 sound library (docs/09 §D: row controls, not a ListView)
     private TextBox _searchBox = null!;
-    private CheckBox _favoriteFilter = null!;
+    private Button _favoriteFilter = null!;
+    private bool _favoritesOnly;
     private Button _importButton = null!;
-    private ListView _clipsList = null!;
+    private Panel _clipsPanel = null!;
     private Label _clipsEmptyLabel = null!;
-    private Button _playButton = null!;
-    private Button _previewButton = null!;
-    private Button _favoriteButton = null!;
-    private Button _moreButton = null!;
+    private Label _clipsDropHint = null!;
+    private readonly List<ClipRow> _clipRows = [];
+    private ClipRow? _selectedRow;
     private ContextMenuStrip _clipMenu = null!;
 
     // §10 hotkeys
@@ -96,6 +105,7 @@ internal sealed class MainForm : Form
     private StatusStrip _status = null!;
     private ToolStripStatusLabel _statusLabel = null!;
     private ToolStripStatusLabel _metricsLabel = null!;
+    private Button _diagnoseButton = null!;
 
     private Panel _content = null!;
     private TableLayoutPanel _stack = null!;
@@ -166,7 +176,7 @@ internal sealed class MainForm : Form
         _presetCombo = Theme.DropDown();
         _presetCombo.Width = Theme.D(190);
 
-        _applyButton = Theme.PrimaryButton("应用预设");
+        _applyButton = Theme.SecondaryButton("应用预设");
         _presetMenuButton = Theme.SecondaryButton("配置管理 ▾");
         _saveButton = Theme.SecondaryButton("保存");
         _settingsButton = Theme.SecondaryButton("设备设置…");
@@ -183,28 +193,50 @@ internal sealed class MainForm : Form
             TextAlign = ContentAlignment.MiddleLeft,
         };
 
-        _phaseChip = Theme.StatusChip("就绪", Theme.TextSecondary);
-        _micChip = Theme.StatusChip("麦克风 关", Theme.TextSecondary);
-        _extrasChip = Theme.StatusChip("附加音频 关", Theme.TextSecondary);
-        _appChip = Theme.StatusChip("应用音频 关", Theme.TextSecondary);
-        _monitorChip = Theme.StatusChip("监听 关", Theme.TextSecondary);
-        _clipChip = Theme.StatusChip("音效 空闲", Theme.TextSecondary);
+        // Big status bar (docs/09 §A1): lamp + headline + subline + route chips.
+        _statusLamp = new Label
+        {
+            AutoSize = false,
+            Size = Theme.DS(16, 16),
+            BackColor = Theme.StatusIdle,
+            Margin = Theme.DP(0, Theme.GapSmall, Theme.GapMedium, 0),
+        };
+        _statusHeadline = new Label
+        {
+            Text = "未对队友发声",
+            AutoSize = true,
+            Font = Theme.Headline,
+            ForeColor = Theme.TextMain,
+            Margin = new Padding(0),
+        };
+        _statusSubline = Theme.Note("");
+        _statusSubline.Margin = new Padding(0);
         _issueLabel = new Label
         {
             Text = "",
             AutoSize = true,
             MaximumSize = new Size(Theme.D(620), 0),
-            ForeColor = Theme.Warning,
+            ForeColor = Theme.StatusFault,
             Font = Theme.Body,
             Margin = Theme.DP(0, 2, 0, 2),
         };
 
-        _micCheck = new CheckBox { Text = "发送到队友", AutoSize = true, Font = Theme.Body, Margin = new Padding(0) };
-        _micGain = Theme.Numeric(0m, 4m, (decimal)GainStep, 2);
+        _micChip = Theme.StatusChip("麦克风 关", Theme.StatusIdle);
+        _extrasChip = Theme.StatusChip("附加音频 关", Theme.StatusIdle);
+        _monitorChip = Theme.StatusChip("监听 关", Theme.StatusIdle);
+        _clipChip = Theme.StatusChip("音效 空闲", Theme.StatusIdle);
 
-        _extrasCheck = new CheckBox { Text = "发送到队友", AutoSize = true, Font = Theme.Body, Margin = new Padding(0) };
-        _appCheck = new CheckBox { Text = "捕获指定应用", AutoSize = true, Font = Theme.Body, Margin = new Padding(0) };
-        _appGain = Theme.Numeric(0m, 4m, (decimal)GainStep, 2);
+        _micCheck = new ToggleSwitch { AccessibleName = "麦克风发送到队友" };
+        _micGain = GainSlider();
+        _micGainLabel = PercentLabel();
+        _micMeter = new LevelMeter();
+        _micMeter.Dock = DockStyle.Fill;
+        _micLevelText = LevelLabel();
+
+        _extrasCheck = new ToggleSwitch { AccessibleName = "附加音频发送到队友" };
+        _appCheck = new ToggleSwitch { AccessibleName = "捕获指定应用" };
+        _appGain = GainSlider();
+        _appGainLabel = PercentLabel();
         _bindAppButton = Theme.SecondaryButton("绑定应用…");
 
         _monitorCombo = Theme.DropDown();
@@ -223,10 +255,14 @@ internal sealed class MainForm : Form
             Width = Theme.D(180),
             Margin = new Padding(0),
         };
-        _monitorGain = Theme.Numeric(0m, 4m, (decimal)GainStep, 2);
+        _monitorVolumeLabel = PercentLabel();
 
         _stopButton = Theme.SecondaryButton("停止音效");
-        _clipGain = Theme.Numeric(0m, 4m, (decimal)GainStep, 2);
+        _clipGain = GainSlider();
+        _clipGainLabel = PercentLabel();
+        _clipMeter = new LevelMeter();
+        _clipMeter.Dock = DockStyle.Fill;
+        _clipLevelText = LevelLabel();
 
         _searchBox = new TextBox
         {
@@ -235,19 +271,16 @@ internal sealed class MainForm : Form
             Margin = new Padding(0),
             PlaceholderText = "搜索音效名称…",
         };
-        _favoriteFilter = new CheckBox { Text = "只看收藏", AutoSize = true, Font = Theme.Body, Margin = new Padding(0) };
+        _favoriteFilter = Theme.SecondaryButton("★ 只看收藏");
+        _favoriteFilter.MinimumSize = Theme.DS(0, 28);
+        _favoriteFilter.Padding = Theme.DP(10, 2, 10, 2);
         _importButton = Theme.SecondaryButton("导入音效…");
 
-        _clipsList = new ListView
+        _clipsPanel = new Panel
         {
             Dock = DockStyle.Fill,
-            View = View.Details,
-            FullRowSelect = true,
-            MultiSelect = false,
-            HideSelection = false,
-            BorderStyle = BorderStyle.None,
-            HeaderStyle = ColumnHeaderStyle.Nonclickable,
-            Font = Theme.Body,
+            AutoScroll = true,
+            BackColor = Theme.CardBack,
         };
         _clipsEmptyLabel = new Label
         {
@@ -257,11 +290,16 @@ internal sealed class MainForm : Form
             ForeColor = Theme.TextSecondary,
             Font = Theme.Body,
         };
+        _clipsDropHint = new Label
+        {
+            Text = "把音频文件（wav / mp3）拖到这里即可导入",
+            Dock = DockStyle.Bottom,
+            Height = Theme.D(44),
+            TextAlign = ContentAlignment.MiddleCenter,
+            ForeColor = Theme.TextSecondary,
+            Font = Theme.NoteFont,
+        };
 
-        _playButton = Theme.PrimaryButton("向队友播放");
-        _previewButton = Theme.SecondaryButton("本地试听");
-        _favoriteButton = Theme.SecondaryButton("收藏/取消");
-        _moreButton = Theme.SecondaryButton("更多 ▾");
         _clipMenu = new ContextMenuStrip { Font = Theme.Body };
 
         _hotkeySummary = Theme.Ellipsis();
@@ -271,7 +309,49 @@ internal sealed class MainForm : Form
         _status = new StatusStrip { SizingGrip = false, Font = Theme.Body };
         _statusLabel = new ToolStripStatusLabel { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
         _metricsLabel = new ToolStripStatusLabel { AutoSize = true, TextAlign = ContentAlignment.MiddleRight };
+        _diagnoseButton = Theme.SecondaryButton("诊断");
+        _diagnoseButton.MinimumSize = Theme.DS(0, 26);
+        _diagnoseButton.Padding = Theme.DP(10, 2, 10, 2);
+        _diagnoseButton.Margin = new Padding(0);
+        _diagnoseButton.Dock = DockStyle.Bottom;
     }
+
+    /// <summary>Gain slider 0–400% (docs/09 decision 1): 5% per tick, no tick marks.</summary>
+    private static TrackBar GainSlider() => new()
+    {
+        Minimum = 0,
+        Maximum = 400,
+        TickFrequency = 100,
+        SmallChange = 5,
+        LargeChange = 25,
+        TickStyle = TickStyle.None,
+        Width = Theme.D(180),
+        Margin = new Padding(0),
+    };
+
+    /// <summary>Right-aligned percentage readout next to a slider; tabular so digits do not jitter.</summary>
+    private static Label PercentLabel() => new()
+    {
+        Text = "0%",
+        AutoSize = false,
+        Width = Theme.D(48),
+        TextAlign = ContentAlignment.MiddleRight,
+        Font = Theme.Body,
+        ForeColor = Theme.TextSecondary,
+        Margin = Theme.DP(Theme.GapSmall, 0, 0, 0),
+    };
+
+    /// <summary>dBFS text for the meter row; −∞ while silent.</summary>
+    private static Label LevelLabel() => new()
+    {
+        Text = "−∞ dB",
+        AutoSize = false,
+        Width = Theme.D(64),
+        TextAlign = ContentAlignment.MiddleRight,
+        Font = Theme.NoteFont,
+        ForeColor = Theme.TextSecondary,
+        Margin = Theme.DP(Theme.GapSmall, 0, 0, 0),
+    };
 
     private void BuildLayout()
     {
@@ -309,6 +389,8 @@ internal sealed class MainForm : Form
 
         _status.Items.Add(_statusLabel);
         _status.Items.Add(_metricsLabel);
+        _diagnoseButton.Click += (_, _) => ShowDiagnostics();
+        Controls.Add(_diagnoseButton);
         Controls.Add(_status);
         Controls.Add(_content);
 
@@ -391,18 +473,55 @@ internal sealed class MainForm : Form
         return bar;
     }
 
+    /// <summary>
+    /// Big status bar (docs/09 §A1): rounded card carrying the lamp, headline
+    /// and subline on the left and the four route chips on the right. The
+    /// chips wrap under the headline on narrow windows instead of clipping.
+    /// </summary>
     private Control BuildStatusSummary()
     {
+        var card = Theme.Card();
+        card.Padding = Theme.DP(Theme.GapMedium, 10, Theme.GapMedium, 10);
+        card.Paint += Theme.CardChrome;
+        card.Margin = new Padding(0, 0, 0, Theme.D(Theme.GapMedium));
+
+        var left = new TableLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2,
+            RowCount = 2,
+            Margin = new Padding(0),
+        };
+        left.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Theme.D(16 + Theme.GapMedium)));
+        left.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        // lamp spans both rows: it is the single "is anyone hearing me" dot
+        left.Controls.Add(_statusLamp, 0, 0);
+        left.SetColumnSpan(_statusLamp, 1);
+        left.SetRowSpan(_statusLamp, 2);
+        _statusLamp.Anchor = AnchorStyles.Left | AnchorStyles.Top;
+        left.Controls.Add(_statusHeadline, 1, 0);
+        left.Controls.Add(_statusSubline, 1, 1);
+
         var chips = new FlowLayoutPanel
         {
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Anchor = AnchorStyles.Left | AnchorStyles.Top,
             WrapContents = true,
-            Margin = new Padding(0, 0, 0, Theme.D(Theme.GapMedium)),
+            Margin = new Padding(0),
         };
-        chips.Controls.AddRange([_phaseChip, _micChip, _extrasChip, _appChip, _monitorChip, _clipChip, _issueLabel]);
-        return chips;
+        chips.Controls.AddRange([_micChip, _extrasChip, _monitorChip, _clipChip]);
+
+        card.ColumnCount = 1;
+        card.RowCount = 3;
+        card.Controls.Add(left, 0, 0);
+        card.Controls.Add(_issueLabel, 0, 1);
+        card.Controls.Add(chips, 0, 2);
+        return card;
     }
 
     private Control BuildRouteSection()
@@ -434,22 +553,24 @@ internal sealed class MainForm : Form
         _routeGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
         _routeGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
 
-        _micCard = new RouteCard("真实麦克风", "输入：未配置", _tips);
+        _micCard = new RouteCard("真实麦克风", "输入：未配置", _tips, icon: IconFont.Mic);
         _micCard.AddRow("发送", [_micCheck]);
         _micCard.AddRow("输入增益", [_micGain]);
+        _micCard.AddRow("电平", [_micMeter, _micLevelText]);
 
-        _extrasCard = new RouteCard("附加音频", "未绑定应用（附加音频=音效）", _tips);
+        _extrasCard = new RouteCard("附加音频", "未绑定应用（附加音频=音效）", _tips, icon: IconFont.AppWindow);
         _extrasCard.AddRow("发送", [_extrasCheck]);
         _extrasCard.AddRow("目标应用", [_appCheck, _bindAppButton]);
         _extrasCard.AddRow("应用增益", [_appGain]);
 
-        _monitorCard = new RouteCard("本地监听", "监听设备：未配置", _tips);
+        _monitorCard = new RouteCard("本地监听", "监听设备：未配置", _tips, icon: IconFont.Headphones);
         _monitorCard.AddRow("模式", [_monitorCombo]);
-        _monitorCard.AddRow("监听音量", [_monitorVolume, _monitorGain]);
+        _monitorCard.AddRow("监听音量", [_monitorVolume, _monitorVolumeLabel]);
 
-        _clipCard = new RouteCard("音效输出", "空闲", _tips);
+        _clipCard = new RouteCard("音效输出", "空闲", _tips, icon: IconFont.Speaker);
         _clipCard.AddRow("播放", [_stopButton]);
         _clipCard.AddRow("音效增益", [_clipGain]);
+        _clipCard.AddRow("电平", [_clipMeter, _clipLevelText]);
 
         PlaceRouteCards(twoColumn: true);
         host.RowCount = 2;
@@ -510,8 +631,7 @@ internal sealed class MainForm : Form
         };
         host.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         host.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        host.RowStyles.Add(new RowStyle(SizeType.Absolute, Theme.D(150)));
-        host.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        host.RowStyles.Add(new RowStyle(SizeType.Absolute, Theme.D(220)));
 
         var header = new TableLayoutPanel
         {
@@ -540,8 +660,7 @@ internal sealed class MainForm : Form
             Margin = new Padding(0),
         };
         _importButton.Margin = Theme.DP(0, 0, Theme.GapSmall, 0);
-        _favoriteFilter.Margin = Theme.DP(0, Theme.D(4), Theme.GapSmall, 0);
-        _favoriteFilter.Anchor = AnchorStyles.Left;
+        _favoriteFilter.Margin = Theme.DP(0, 0, Theme.GapSmall, 0);
         _searchBox.Margin = Theme.DP(0, Theme.D(3), 0, 0);
         _searchBox.Anchor = AnchorStyles.Left;
         tools.Controls.AddRange([_importButton, _favoriteFilter, _searchBox]);
@@ -553,32 +672,20 @@ internal sealed class MainForm : Form
         var listCard = Theme.Card();
         listCard.Padding = Theme.DP(1);
         listCard.Dock = DockStyle.Fill;
-        listCard.Paint += Theme.CardBorder;
-        _clipsList.Columns.Add("名称", Theme.D(320));
-        _clipsList.Columns.Add("时长", Theme.D(90), HorizontalAlignment.Right);
-        _clipsList.Columns.Add("分组", Theme.D(110));
-        _clipsList.Columns.Add("收藏", Theme.D(60), HorizontalAlignment.Center);
-        _clipsList.Columns.Add("状态", Theme.D(120));
-        _clipsList.Dock = DockStyle.Fill;
+        listCard.Paint += Theme.CardChrome;
+        _clipsPanel.Dock = DockStyle.Fill;
         _clipsEmptyLabel.Dock = DockStyle.Fill;
-        listCard.Controls.Add(_clipsList);
+        listCard.Controls.Add(_clipsPanel);
         listCard.Controls.Add(_clipsEmptyLabel);
+
+        // drop zone doubles as the card's bottom edge; both accept files
+        listCard.AllowDrop = true;
+        _clipsDropHint.AllowDrop = true;
+        _clipsPanel.AllowDrop = true;
         host.Controls.Add(listCard, 0, 1);
 
-        var actions = new FlowLayoutPanel
-        {
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Anchor = AnchorStyles.Left | AnchorStyles.Top,
-            WrapContents = true,
-            Margin = Theme.DP(0, Theme.GapSmall, 0, 0),
-        };
-        _playButton.Margin = Theme.DP(0, 0, Theme.GapSmall, Theme.GapSmall);
-        _previewButton.Margin = Theme.DP(0, 0, Theme.GapSmall, Theme.GapSmall);
-        _favoriteButton.Margin = Theme.DP(0, 0, Theme.GapSmall, Theme.GapSmall);
-        _moreButton.Margin = Theme.DP(0, 0, 0, Theme.GapSmall);
-        actions.Controls.AddRange([_playButton, _previewButton, _favoriteButton, _moreButton]);
-        host.Controls.Add(actions, 0, 2);
+        host.Controls.Add(_clipsDropHint, 0, 2);
+        host.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         return host;
     }
 
@@ -673,27 +780,21 @@ internal sealed class MainForm : Form
         _settingsButton.Click += (_, _) => OpenDeviceSettings();
         _emergencyButton.Click += (_, _) => ToggleEmergency();
 
-        _micCheck.CheckedChanged += (_, _) => Toggle(ToggleRoute.Mic, _micCheck.Checked);
-        _extrasCheck.CheckedChanged += (_, _) => Toggle(ToggleRoute.Extras, _extrasCheck.Checked);
-        _appCheck.CheckedChanged += (_, _) => Toggle(ToggleRoute.App, _appCheck.Checked);
+        _micCheck.Toggled += (_, _) => Toggle(ToggleRoute.Mic, _micCheck.On);
+        _extrasCheck.Toggled += (_, _) => Toggle(ToggleRoute.Extras, _extrasCheck.On);
+        _appCheck.Toggled += (_, _) => Toggle(ToggleRoute.App, _appCheck.On);
         _bindAppButton.Click += (_, _) => BindApplication();
         _monitorCombo.SelectedIndexChanged += (_, _) => ApplyMonitorSelection();
         _monitorVolume.ValueChanged += (_, _) => OnMonitorVolumeChanged();
-        _monitorGain.ValueChanged += (_, _) => OnMonitorGainChanged();
-        WireGain(_micGain, g => _shell.Session.SetGains(CurrentGains() with { Mic = g }), s => s.Gains.Mic);
-        WireGain(_appGain, g => _shell.Session.SetGains(CurrentGains() with { App = g }), s => s.Gains.App);
-        WireGain(_clipGain, g => _shell.Session.SetGains(CurrentGains() with { Clip = g }), s => s.Gains.Clip);
+        WireGain(_micGain, _micGainLabel, g => _shell.Session.SetGains(CurrentGains() with { Mic = g }), s => s.Gains.Mic);
+        WireGain(_appGain, _appGainLabel, g => _shell.Session.SetGains(CurrentGains() with { App = g }), s => s.Gains.App);
+        WireGain(_clipGain, _clipGainLabel, g => _shell.Session.SetGains(CurrentGains() with { Clip = g }), s => s.Gains.Clip);
         _stopButton.Click += (_, _) => Run(_shell.Session.StopClip(), "停止音效");
 
-        _playButton.Click += async (_, _) => await PlaySelectedAsync(send: true);
-        _previewButton.Click += async (_, _) => await PlaySelectedAsync(send: false);
         _importButton.Click += async (_, _) => await ImportClipAsync();
-        _favoriteButton.Click += (_, _) => ToggleFavorite();
-        _moreButton.Click += (_, _) => _clipMenu.Show(_moreButton, new Point(0, _moreButton.Height));
         _searchBox.TextChanged += (_, _) => RefreshClips();
-        _favoriteFilter.CheckedChanged += (_, _) => RefreshClips();
-        _clipsList.SelectedIndexChanged += (_, _) => UpdateClipButtons();
-        _clipsList.DoubleClick += async (_, _) => await PlaySelectedAsync(send: true);
+        _favoriteFilter.Click += (_, _) => ToggleFavoriteFilter();
+        WireDropImport();
 
         _hotkeyPanelButton.Click += (_, _) => OpenHotkeyEditor(focusClipId: null);
 
@@ -703,6 +804,50 @@ internal sealed class MainForm : Form
             QueueTopClusterFit();
         };
         Shown += (_, _) => ApplyResponsiveLayout();
+    }
+
+    /// <summary>Favorites-only toggle with an on-state look; off state is plain secondary.</summary>
+    private void ToggleFavoriteFilter()
+    {
+        _favoritesOnly = !_favoritesOnly;
+        _favoriteFilter.ForeColor = _favoritesOnly ? Theme.Warning : Theme.TextMain;
+        _favoriteFilter.BackColor = _favoritesOnly ? Theme.ChipBackWarn : Theme.CardBack;
+        RefreshClips();
+    }
+
+    /// <summary>Drag-drop import (docs/09 §D3): wav/mp3 file lists on the library panel or hint.</summary>
+    private void WireDropImport()
+    {
+        foreach (var target in new Control[] { _clipsPanel, _clipsDropHint })
+        {
+            target.DragEnter += (_, e) =>
+            {
+                if (DroppedAudio(e) is { Length: > 0 })
+                {
+                    e.Effect = DragDropEffects.Copy;
+                }
+            };
+            target.DragDrop += async (_, e) =>
+            {
+                if (!_importing && DroppedAudio(e) is { Length: > 0 } files)
+                {
+                    await ImportPathsAsync(files);
+                }
+            };
+        }
+    }
+
+    private static string[] DroppedAudio(DragEventArgs e)
+    {
+        if (!e.Data!.GetDataPresent(DataFormats.FileDrop))
+        {
+            return [];
+        }
+
+        return (e.Data.GetData(DataFormats.FileDrop) as string[] ?? [])
+            .Where(path => path.EndsWith(".wav", StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
     }
 
     private void ApplyResponsiveLayout()
@@ -819,38 +964,45 @@ internal sealed class MainForm : Form
         {
             var status = _shell.Session.Status();
 
-            UpdatePhaseChip(status);
+            UpdateStatusBar(status);
             _emergencyButton.Text = status.EmergencyLatched ? "解除静音（保持全关）" : "全部静音";
 
-            UpdateRouteChip(_micChip, "麦克风", status.Switches.MicSendEnabled, status.Devices is not null && !MicAvailable(status));
-            UpdateRouteChip(_extrasChip, "附加音频", status.Switches.ExtrasSendEnabled, unavailable: false);
-            UpdateRouteChip(_appChip, "应用音频", status.Switches.AppSendEnabled, unavailable: status.AppBinding is null);
-            UpdateRouteChip(_monitorChip, status.MonitorMode == MonitorMode.FullEndpoint ? "监听·实际" : "监听·仅音效",
-                status.Switches.MonitorEnabled, unavailable: status.Devices is not null && string.IsNullOrEmpty(status.Devices.MonitorDeviceId));
+            UpdateRouteChip(_micChip, "麦克风", status.Switches.MicSendEnabled,
+                fault: status.Devices is not null && !MicAvailable(status));
+            UpdateRouteChip(_extrasChip, "附加音频", status.Switches.ExtrasSendEnabled, fault: false);
+            UpdateRouteChip(_monitorChip, "监听", status.Switches.MonitorEnabled,
+                fault: status.Devices is not null && string.IsNullOrEmpty(status.Devices.MonitorDeviceId));
             UpdateClipChip(status);
             _issueLabel.Text = DescribeIssues(status);
 
             // route cards: controls mirror the snapshot; user edits are ignored while refreshing
-            _micCheck.Checked = status.Switches.MicSendEnabled;
+            _micCheck.On = status.Switches.MicSendEnabled;
             _micCheck.Enabled = !status.EmergencyLatched;
-            _micGain.Value = (decimal)status.Gains.Mic;
+            SyncSlider(_micGain, _micGainLabel, status.Gains.Mic);
 
-            _extrasCheck.Checked = status.Switches.ExtrasSendEnabled;
+            _extrasCheck.On = status.Switches.ExtrasSendEnabled;
             _extrasCheck.Enabled = !status.EmergencyLatched;
-            _appCheck.Checked = status.Switches.AppSendEnabled;
+            _appCheck.On = status.Switches.AppSendEnabled;
             _appCheck.Enabled = status.Switches.ExtrasSendEnabled && !status.EmergencyLatched;
             _bindAppButton.Enabled = !status.Switches.AppSendEnabled && !status.EmergencyLatched;
-            _appGain.Value = (decimal)status.Gains.App;
+            SyncSlider(_appGain, _appGainLabel, status.Gains.App);
 
             _monitorCombo.SelectedIndex = MonitorIndex(status);
             _monitorCombo.Enabled = !status.EmergencyLatched;
-            _monitorVolume.Value = ClampTrack((int)Math.Round(status.Gains.Monitor * 100));
-            _monitorGain.Value = (decimal)Math.Round(status.Gains.Monitor, 2);
+            SyncSlider(_monitorVolume, _monitorVolumeLabel, status.Gains.Monitor);
             _monitorVolume.Enabled = !status.EmergencyLatched;
-            _monitorGain.Enabled = !status.EmergencyLatched;
 
-            _clipGain.Value = (decimal)status.Gains.Clip;
+            SyncSlider(_clipGain, _clipGainLabel, status.Gains.Clip);
             _stopButton.Enabled = status.Clip is not null;
+
+            // level meters (docs/09 §A3): one decay tick per poll keeps the bar moving
+            var metrics = _shell.Session.Metrics();
+            var micActive = status.Switches.MicSendEnabled && !status.EmergencyLatched && MicAvailable(status);
+            _micMeter.Sample(metrics.MixerPeak, micActive);
+            _micLevelText.Text = LevelText(metrics.MixerPeak, micActive);
+            var clipActive = status.Clip is not null && !status.EmergencyLatched;
+            _clipMeter.Sample(metrics.MixerPeak, clipActive);
+            _clipLevelText.Text = LevelText(metrics.MixerPeak, clipActive);
 
             UpdateCards(status);
             UpdateClipPlayState(status);
@@ -863,6 +1015,23 @@ internal sealed class MainForm : Form
         }
     }
 
+    /// <summary>Writes an engine gain into a slider+label pair without firing user events.</summary>
+    private void SyncSlider(TrackBar slider, Label label, float gain)
+    {
+        var percent = ClampTrack((int)Math.Round(gain * 100));
+        if (slider.Value != percent)
+        {
+            slider.Value = percent;
+        }
+
+        label.Text = $"{percent}%";
+    }
+
+    /// <summary>dBFS text; an inactive route shows −∞ instead of a stale number.</summary>
+    private static string LevelText(float peak, bool active) => !active || peak <= 0f
+        ? "−∞ dB"
+        : $"{20 * Math.Log10(Math.Clamp(peak, 1e-4f, 4f)):0.#} dB";
+
     private void UpdateCards(SessionStatus status)
     {
         var mic = status.Devices;
@@ -872,9 +1041,9 @@ internal sealed class MainForm : Form
         _micCard.SetStatus(
             status.EmergencyLatched ? "锁存" :
             !MicAvailable(status) ? "设备不可用" :
-            status.Switches.MicSendEnabled ? "发送中" : "已关闭",
-            status.EmergencyLatched || !MicAvailable(status) ? Theme.Error :
-            status.Switches.MicSendEnabled ? Theme.Success : Theme.TextSecondary);
+            status.Switches.MicSendEnabled ? "发送中" : "关",
+            status.EmergencyLatched || !MicAvailable(status) ? Theme.StatusFault :
+            status.Switches.MicSendEnabled ? Theme.StatusSending : Theme.StatusIdle);
 
         _extrasCard.SetDescription(status.AppBinding is { } binding
             ? $"目标应用：{binding.Description}（pid {binding.ProcessId}）"
@@ -882,9 +1051,9 @@ internal sealed class MainForm : Form
         _extrasCard.SetStatus(
             status.EmergencyLatched ? "锁存" :
             status.Switches.AppSendEnabled ? "应用捕获中" :
-            status.Switches.ExtrasSendEnabled ? "已开启" : "已关闭",
-            status.EmergencyLatched ? Theme.Error :
-            status.Switches.ExtrasSendEnabled ? Theme.Success : Theme.TextSecondary);
+            status.Switches.ExtrasSendEnabled ? "开" : "关",
+            status.EmergencyLatched ? Theme.StatusFault :
+            status.Switches.ExtrasSendEnabled ? Theme.StatusSending : Theme.StatusIdle);
 
         var monitorDevice = status.Devices?.MonitorDeviceId;
         _monitorCard.SetDescription(string.IsNullOrEmpty(monitorDevice)
@@ -893,16 +1062,17 @@ internal sealed class MainForm : Form
         _monitorCard.SetStatus(
             status.EmergencyLatched ? "锁存" :
             status.MonitorSuspendedForPreview ? "试听中暂停" :
-            status.Switches.MonitorEnabled ? "监听中" : "已关闭",
-            status.EmergencyLatched ? Theme.Error :
-            status.Switches.MonitorEnabled ? Theme.Success : Theme.TextSecondary);
+            status.Switches.MonitorEnabled ? "监听中" : "关",
+            status.EmergencyLatched ? Theme.StatusFault :
+            status.MonitorSuspendedForPreview ? Theme.StatusWarn :
+            status.Switches.MonitorEnabled ? Theme.StatusSending : Theme.StatusIdle);
 
         _clipCard.SetDescription(status.Clip is { } clip
             ? $"{(clip.Mode == ClipPlaybackMode.Send ? "正在发送" : "本地试听")}：{ClipName(clip.ClipId)}"
             : "空闲（在音效库中选择并播放）");
         _clipCard.SetStatus(
             status.Clip is null ? "空闲" : status.Clip.Mode == ClipPlaybackMode.Send ? "发送中" : "试听中",
-            status.Clip is { Mode: ClipPlaybackMode.Send } ? Theme.Success : Theme.TextSecondary);
+            status.Clip is { Mode: ClipPlaybackMode.Send } ? Theme.StatusSending : Theme.StatusIdle);
     }
 
     private void UpdateStatusStrip(SessionStatus status)
@@ -914,13 +1084,35 @@ internal sealed class MainForm : Form
         var hotkeyText = _shell.Soundboard.HotkeyBackendAvailable ? $"热键：{hotkeys} 项" : "热键：不可用";
         _statusLabel.Text = $"{DescribePhase(status)}　|　{deviceText}　|　{hotkeyText}";
 
-        // live level forensics: shows WHERE clipping happens (docs/01 B08)
+        // Only the health verdict stays on the strip (docs/09 §A4); raw
+        // clipping/underrun counters live in the diagnostics popup.
         var metrics = _shell.Session.Metrics();
-        _metricsLabel.Text =
-            $"峰值 {metrics.MixerPeak:0.00} | 削波 {metrics.MixerClippedSamples} | 硬跳变 {metrics.MixerHardSteps} | 欠载 {metrics.MixerUnderrunFrames}";
-        _metricsLabel.ForeColor = metrics.MixerClippedSamples > 0 || metrics.MixerPeak >= 0.99f
-            ? Theme.Error
-            : metrics.MixerPeak >= 0.8f ? Theme.Warning : Theme.TextMain;
+        var fault = metrics.MixerClippedSamples > 0 || metrics.MixerPeak >= 0.99f;
+        _metricsLabel.Text = fault ? "电平异常" : "运行正常";
+        _metricsLabel.ForeColor = fault ? Theme.StatusFault : Theme.Success;
+        _diagnoseButton.Text = fault ? "诊断 ●" : "诊断";
+    }
+
+    /// <summary>Popup with the raw mixer forensics (docs/01 B08) behind the 诊断 button.</summary>
+    private void ShowDiagnostics()
+    {
+        var m = _shell.Session.Metrics();
+        var status = _shell.Session.Status();
+        var lines = new StringBuilder()
+            .AppendLine("音频引擎实时指标（docs/01 B08 取证口径）")
+            .AppendLine()
+            .AppendLine($"峰值（MixerPeak）：{m.MixerPeak:0.000}")
+            .AppendLine($"削波样本（ClippedSamples）：{m.MixerClippedSamples}")
+            .AppendLine($"硬跳变（HardSteps）：{m.MixerHardSteps}")
+            .AppendLine($"欠载帧（UnderrunFrames）：{m.MixerUnderrunFrames}")
+            .AppendLine($"拒绝拉取（DeniedPulls）：{m.MixerDeniedPulls}")
+            .AppendLine($"混音帧（FramesMixed）：{m.MixerFramesMixed}")
+            .AppendLine($"真麦缓冲比（MicRatio）：{m.MicRatio:F4}")
+            .AppendLine($"应用缓冲比（AppRatio）：{m.AppRatio:F4}")
+            .AppendLine()
+            .AppendLine($"日志文件：logs/onbody.log（上限 256 KB，自动轮转）");
+        _ = status; // kept for future per-route diagnostics rows
+        MessageBox.Show(this, lines.ToString(), "诊断", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     // ---------------------------------------------------------------- commands
@@ -1012,39 +1204,7 @@ internal sealed class MainForm : Form
             return;
         }
 
-        var gain = _monitorVolume.Value / 100f;
-        _refreshing = true;
-        try
-        {
-            _monitorGain.Value = (decimal)Math.Round(gain, 2);
-        }
-        finally
-        {
-            _refreshing = false;
-        }
-
-        ApplyMonitorGain(gain);
-    }
-
-    private void OnMonitorGainChanged()
-    {
-        if (_refreshing)
-        {
-            return;
-        }
-
-        var gain = (float)_monitorGain.Value;
-        _refreshing = true;
-        try
-        {
-            _monitorVolume.Value = ClampTrack((int)Math.Round(gain * 100));
-        }
-        finally
-        {
-            _refreshing = false;
-        }
-
-        ApplyMonitorGain(gain);
+        ApplyMonitorGain(_monitorVolume.Value / 100f);
     }
 
     private void ApplyMonitorGain(float gain)
@@ -1053,7 +1213,12 @@ internal sealed class MainForm : Form
         MarkDirty();
     }
 
-    private void WireGain(NumericUpDown control, Func<float, CommandResult> apply, Func<SessionStatus, float> read)
+    /// <summary>
+    /// Slider gain wiring: value is whole percent (0–400), the label mirrors it
+    /// and the engine gets the /100 factor. Read-back mismatch is still shown
+    /// (§7.4) so a rejected gain never looks applied.
+    /// </summary>
+    private void WireGain(TrackBar control, Label label, Func<float, CommandResult> apply, Func<SessionStatus, float> read)
     {
         control.ValueChanged += (_, _) =>
         {
@@ -1062,7 +1227,8 @@ internal sealed class MainForm : Form
                 return;
             }
 
-            var requested = (float)control.Value;
+            var requested = control.Value / 100f;
+            label.Text = $"{control.Value}%";
             var result = apply(requested);
             if (!result.Accepted)
             {
@@ -1132,12 +1298,23 @@ internal sealed class MainForm : Form
             Title = "导入音效",
             Filter = "音频文件 (*.wav;*.mp3)|*.wav;*.mp3",
             CheckFileExists = true,
+            Multiselect = true,
         };
         if (dialog.ShowDialog(this) != DialogResult.OK)
         {
             return;
         }
 
+        await ImportPathsAsync(dialog.FileNames);
+    }
+
+    /// <summary>
+    /// Shared import path for the button and drag-drop (docs/09 §D3): the same
+    /// duplicate confirmation, busy handling and log lines as the original
+    /// single-file flow, now looping over several files.
+    /// </summary>
+    private async Task ImportPathsAsync(string[] paths)
+    {
         var library = _shell.Soundboard.Library;
         if (library is null)
         {
@@ -1150,43 +1327,42 @@ internal sealed class MainForm : Form
         _importButton.Text = "导入中…";
         try
         {
-            var path = dialog.FileName;
-            var first = await Task.Run(() => TryImport(library, path, allowDuplicate: false));
-            if (first.Error is not null)
+            foreach (var path in paths)
             {
-                ShowError("导入失败", $"{first.Error}\n处理：确认文件为 wav/mp3、未损坏、时长不超过 60 秒。");
-                return;
-            }
-
-            if (first.Result is { Outcome: ImportOutcome.Duplicate } duplicate)
-            {
-                var answer = MessageBox.Show(
-                    this,
-                    $"库中已存在相同内容的音效「{duplicate.ExistingDuplicate!.DisplayName}」。\n仍要再导入一份副本吗？",
-                    "重复音效", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-                if (answer != DialogResult.Yes)
+                var first = await Task.Run(() => TryImport(library, path, allowDuplicate: false));
+                if (first.Error is not null)
                 {
-                    return;
+                    ShowError("导入失败", $"{Path.GetFileName(path)}：{first.Error}\n处理：确认文件为 wav/mp3、未损坏、时长不超过 60 秒。");
+                    continue;
                 }
 
-                var second = await Task.Run(() => TryImport(library, path, allowDuplicate: true));
-                if (second.Error is not null || second.Result is not { } forced)
+                if (first.Result is { Outcome: ImportOutcome.Duplicate } duplicate)
                 {
-                    ShowError("导入失败", second.Error ?? "未知原因");
-                    return;
+                    var answer = MessageBox.Show(
+                        this,
+                        $"库中已存在相同内容的音效「{duplicate.ExistingDuplicate!.DisplayName}」。\n仍要再导入一份副本吗？",
+                        "重复音效", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                    if (answer != DialogResult.Yes)
+                    {
+                        continue;
+                    }
+
+                    var second = await Task.Run(() => TryImport(library, path, allowDuplicate: true));
+                    if (second.Error is not null || second.Result is not { } forced)
+                    {
+                        ShowError("导入失败", second.Error ?? "未知原因");
+                        continue;
+                    }
+
+                    _shell.Log($"[clip] 已导入副本 {forced.Item.ClipId}（{forced.Item.DisplayName}）");
+                    continue;
                 }
 
-                _shell.Log($"[clip] 已导入副本 {forced.Item.ClipId}（{forced.Item.DisplayName}）");
-                RefreshClips();
-                return;
+                if (first.Result is { } imported)
+                {
+                    _shell.Log($"[clip] 已导入 {imported.Item.ClipId}（{imported.Item.DurationMs / 1000.0:F1}s，{imported.Item.Format}）");
+                }
             }
-
-            if (first.Result is { } imported)
-            {
-                _shell.Log($"[clip] 已导入 {imported.Item.ClipId}（{imported.Item.DurationMs / 1000.0:F1}s，{imported.Item.Format}）");
-            }
-
-            RefreshClips();
         }
         finally
         {
@@ -1194,6 +1370,8 @@ internal sealed class MainForm : Form
             _importButton.Text = "导入音效…";
             SetBusy(false);
         }
+
+        RefreshClips();
     }
 
     private static (ImportResult? Result, string? Error) TryImport(ClipLibrary library, string path, bool allowDuplicate)
@@ -1476,6 +1654,7 @@ internal sealed class MainForm : Form
         editor.ShowDialog(this);
         RefreshHotkeys();
         RefreshStatus();
+        RefreshClips(); // hotkey column reads ClipHotkeys (docs/09 §D1)
     }
 
     // ------------------------------------------------------------------ lists
@@ -1510,63 +1689,88 @@ internal sealed class MainForm : Form
         var selectedId = selectClipId ?? SelectedClip()?.ClipId;
         var library = _shell.Soundboard.Library;
         var query = _searchBox.Text.Trim();
-        var items = library?.Search(query.Length == 0 ? null : query, favoritesOnly: _favoriteFilter.Checked) ?? [];
+        var items = library?.Search(query.Length == 0 ? null : query, favoritesOnly: _favoritesOnly) ?? [];
+        var hotkeys = _shell.Soundboard.Settings.Data.ClipHotkeys;
 
-        _clipsList.BeginUpdate();
+        _clipsPanel.SuspendLayout();
         try
         {
-            _clipsList.Items.Clear();
+            foreach (var old in _clipRows)
+            {
+                old.Dispose();
+            }
+
+            _clipRows.Clear();
+            _clipsPanel.Controls.Clear();
+            _selectedRow = null;
             foreach (var item in items)
             {
                 var available = library?.IsAvailable(item.ClipId) ?? false;
-                var row = new ListViewItem(item.DisplayName) { Tag = item };
-                row.SubItems.Add(FormatDuration(item.DurationMs));
-                row.SubItems.Add(GroupName(item.GroupId));
-                row.SubItems.Add(item.Favorite ? "★" : "");
-                row.SubItems.Add(available ? "" : "素材缺失");
-                if (!available)
-                {
-                    row.ForeColor = Theme.Error;
-                }
-
-                _clipsList.Items.Add(row);
+                hotkeys.TryGetValue(item.ClipId, out var gesture);
+                var row = new ClipRow(
+                    item,
+                    GroupName(item.GroupId),
+                    gesture,
+                    available,
+                    SelectRow,
+                    _ => ToggleFavorite(),
+                    _ => FirePlay(send: false),
+                    _ => FirePlay(send: true),
+                    r => OpenHotkeyEditor(focusClipId: r.Item.ClipId),
+                    (_, screen) => _clipMenu.Show(screen));
+                _clipRows.Add(row);
                 if (item.ClipId == selectedId)
                 {
                     row.Selected = true;
-                    _clipsList.FocusedItem = row;
+                    _selectedRow = row;
                 }
+            }
+
+            // Dock=Top: add in reverse so the visual order follows the library order
+            for (var i = _clipRows.Count - 1; i >= 0; i--)
+            {
+                _clipsPanel.Controls.Add(_clipRows[i]);
             }
         }
         finally
         {
-            _clipsList.EndUpdate();
+            _clipsPanel.ResumeLayout(performLayout: true);
         }
 
-        var empty = _clipsList.Items.Count == 0;
-        _clipsList.Visible = !empty;
+        var empty = _clipRows.Count == 0;
+        _clipsPanel.Visible = !empty;
         _clipsEmptyLabel.Visible = empty;
         _clipsEmptyLabel.Text = library is null
             ? "音效库不可用（索引损坏）；本次运行无法导入或播放。"
             : empty
-                ? query.Length > 0 || _favoriteFilter.Checked
+                ? query.Length > 0 || _favoritesOnly
                     ? "没有匹配的音效（清空搜索或取消「只看收藏」）"
                     : "尚无音效，导入音频文件以开始使用"
                 : string.Empty;
-        UpdateClipButtons();
         _lastClipKey = null;
         UpdateClipPlayState(_shell.Session.Status());
     }
 
-    private void UpdateClipButtons()
+    /// <summary>Fire-and-forget entry for in-row play buttons (decoding stays off the UI thread inside).</summary>
+    private async void FirePlay(bool send) => await PlaySelectedAsync(send);
+
+    private void SelectRow(ClipRow row)
     {
-        var has = SelectedClip() is not null;
-        _playButton.Enabled = has && !_importing;
-        _previewButton.Enabled = has && !_importing;
-        _favoriteButton.Enabled = has;
-        _moreButton.Enabled = has;
+        if (_selectedRow == row)
+        {
+            return;
+        }
+
+        if (_selectedRow is not null)
+        {
+            _selectedRow.Selected = false;
+        }
+
+        _selectedRow = row;
+        _selectedRow.Selected = true;
     }
 
-    /// <summary>Updates only the "状态" cell of the playing row (no full rebuild each poll).</summary>
+    /// <summary>Updates only the playback cell of each row (no full rebuild each poll).</summary>
     private void UpdateClipPlayState(SessionStatus status)
     {
         var key = status.Clip is { } clip ? $"{clip.ClipId}|{clip.Mode}|{clip.PlaybackEpoch}" : string.Empty;
@@ -1576,20 +1780,14 @@ internal sealed class MainForm : Form
         }
 
         _lastClipKey = key;
-        foreach (ListViewItem row in _clipsList.Items)
+        var library = _shell.Soundboard.Library;
+        foreach (var row in _clipRows)
         {
-            if (row.Tag is not ClipItem item)
-            {
-                continue;
-            }
-
-            var text = status.Clip is { } active && active.ClipId == item.ClipId
-                ? active.Mode == ClipPlaybackMode.Send ? "▶ 发送中" : "▶ 试听中"
-                : row.SubItems[4].Text == "素材缺失" ? "素材缺失" : string.Empty;
-            if (row.SubItems[4].Text != text)
-            {
-                row.SubItems[4].Text = text;
-            }
+        var active = status.Clip is { } activeClip && activeClip.ClipId == row.Item.ClipId ? activeClip : null;
+            row.SetPlaying(
+                active is { Mode: ClipPlaybackMode.Send },
+                active is { Mode: ClipPlaybackMode.Preview },
+                missing: !(library?.IsAvailable(row.Item.ClipId) ?? false));
         }
     }
 
@@ -1637,15 +1835,11 @@ internal sealed class MainForm : Form
 
     private void SetBusy(bool busy)
     {
-        _playButton.Enabled = !busy && SelectedClip() is not null;
-        _previewButton.Enabled = !busy && SelectedClip() is not null;
         _importButton.Enabled = !busy;
         UseWaitCursor = busy;
     }
 
-    private ClipItem? SelectedClip() => _clipsList.SelectedItems.Count > 0
-        ? _clipsList.SelectedItems[0].Tag as ClipItem
-        : null;
+    private ClipItem? SelectedClip() => _selectedRow?.Item;
 
     private PresetSummary? SelectedPreset()
     {
@@ -1796,38 +1990,72 @@ internal sealed class MainForm : Form
         && !string.IsNullOrEmpty(devices.MicDeviceId)
         && _shell.Devices.IsAvailable(devices.MicDeviceId);
 
-    private void UpdatePhaseChip(SessionStatus status)
+    /// <summary>
+    /// Big status bar truth table (docs/09 §A1): faults first, then "sends to
+    /// teammates" (green), then amber for attention states, idle gray last.
+    /// The headline states the one thing the user opens the window to learn.
+    /// </summary>
+    private void UpdateStatusBar(SessionStatus status)
     {
-        var (text, color) = status.EmergencyLatched
-            ? ("紧急静音已锁存", Theme.Error)
-            : status.OutputLost
-                ? ("虚拟输出已失效", Theme.Error)
-                : status.Switches.AnySendEnabled
-                    ? ("正在发送", Theme.Success)
-                    : status.DevicesValidated
-                        ? ("就绪", Theme.TextSecondary)
-                        : ("待配置", Theme.Warning);
-        _phaseChip.Text = text;
-        _phaseChip.ForeColor = color;
+        string headline, subline;
+        Color lamp;
+        if (status.EmergencyLatched)
+        {
+            (headline, subline, lamp) = ("紧急静音已锁存", "发送与监听全部关闭，解除后保持全关，需逐路手动开启", Theme.StatusFault);
+        }
+        else if (status.OutputLost)
+        {
+            (headline, subline, lamp) = ("虚拟输出已失效", "发送全部关闭。处理：打开「设备设置…」确认端点后保存重新应用", Theme.StatusFault);
+        }
+        else if (status.Switches.AnySendEnabled)
+        {
+            (headline, subline, lamp) = ("正在对队友发声", "麦克风 / 附加音频 / 应用音频中至少一路已发送", Theme.StatusSending);
+        }
+        else if (status.Clip is { Mode: ClipPlaybackMode.Preview })
+        {
+            (headline, subline, lamp) = ("正在本地试听", "音效只在本地播放，队友听不到", Theme.StatusWarn);
+        }
+        else if (!status.DevicesValidated)
+        {
+            (headline, subline, lamp) = ("待配置", "设备未配置或校验未通过，配置完成前无法发声", Theme.StatusWarn);
+        }
+        else
+        {
+            (headline, subline, lamp) = ("未对队友发声", "所有发送开关均已关闭，队友现在听不到你", Theme.StatusIdle);
+        }
+
+        _statusLamp.BackColor = lamp;
+        _statusHeadline.Text = headline;
+        _statusHeadline.ForeColor = lamp == Theme.StatusFault ? Theme.StatusFault : Theme.TextMain;
+        _statusSubline.Text = subline;
     }
 
-    private static void UpdateRouteChip(Label chip, string name, bool enabled, bool unavailable)
+    /// <summary>
+    /// Route chip wording (docs/09 §A2): 开/关 for switches, 未配置/设备不可用
+    /// as faults (red), everything else neutral. Red never appears for a mere
+    /// "off" route.
+    /// </summary>
+    private static void UpdateRouteChip(Label chip, string name, bool enabled, bool fault)
     {
-        chip.Text = unavailable && !enabled ? $"{name} 不可用" : $"{name} {(enabled ? "开" : "关")}";
-        chip.ForeColor = unavailable && !enabled ? Theme.Error : enabled ? Theme.Success : Theme.TextSecondary;
+        chip.Text = fault && !enabled ? $"{name} 设备不可用" : $"{name} {(enabled ? "开" : "关")}";
+        chip.ForeColor = fault && !enabled ? Theme.StatusFault : enabled ? Theme.StatusSending : Theme.StatusIdle;
+        chip.BackColor = fault && !enabled ? Theme.ChipBackFault : enabled ? Theme.ChipBackGood : Theme.ChipBack;
     }
 
     private void UpdateClipChip(SessionStatus status)
     {
         if (status.Clip is { } clip)
         {
-            _clipChip.Text = $"音效 {(clip.Mode == ClipPlaybackMode.Send ? "发送中" : "试听中")}";
-            _clipChip.ForeColor = clip.Mode == ClipPlaybackMode.Send ? Theme.Success : Theme.TextSecondary;
+            var sending = clip.Mode == ClipPlaybackMode.Send;
+            _clipChip.Text = $"音效 {(sending ? "发送中" : "试听中")}";
+            _clipChip.ForeColor = sending ? Theme.StatusSending : Theme.StatusWarn;
+            _clipChip.BackColor = sending ? Theme.ChipBackGood : Theme.ChipBackWarn;
         }
         else
         {
             _clipChip.Text = "音效 空闲";
-            _clipChip.ForeColor = Theme.TextSecondary;
+            _clipChip.ForeColor = Theme.StatusIdle;
+            _clipChip.BackColor = Theme.ChipBack;
         }
     }
 

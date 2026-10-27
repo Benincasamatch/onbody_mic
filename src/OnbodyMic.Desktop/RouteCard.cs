@@ -18,7 +18,7 @@ internal sealed class RouteCard : TableLayoutPanel
     private readonly Label _description;
     private readonly ToolTip _tips;
 
-    public RouteCard(string title, string description, ToolTip tips)
+    public RouteCard(string title, string description, ToolTip tips, char? icon = null)
     {
         _tips = tips;
         ColumnCount = 2;
@@ -30,21 +30,25 @@ internal sealed class RouteCard : TableLayoutPanel
         Dock = DockStyle.Fill;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        Paint += Theme.CardBorder;
+        Paint += Theme.CardChrome;
+        SizeChanged += (_, _) => Theme.ClipToCard(this);
 
         var header = new TableLayoutPanel
         {
-            ColumnCount = 2,
+            ColumnCount = 3,
             RowCount = 1,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top,
             Margin = Theme.DP(0, 0, 0, Theme.GapSmall),
         };
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
-        var titleLabel = new Label
+        // Icon block (docs/09 §E1): 32px rounded square, accent-tinted; the
+        // glyph disappears entirely when no icon font exists (§5.4).
+        Control head = new Label
         {
             Text = title,
             Font = Theme.CardTitle,
@@ -53,18 +57,48 @@ internal sealed class RouteCard : TableLayoutPanel
             Margin = new Padding(0),
             TextAlign = ContentAlignment.MiddleLeft,
         };
+        if (icon is { } glyph && IconFont.Available)
+        {
+            var block = new Label
+            {
+                Text = glyph.ToString(),
+                Font = IconFont.Font(Theme.CardIconSize),
+                ForeColor = Theme.Accent,
+                BackColor = Theme.IconBack,
+                AutoSize = false,
+                Size = Theme.DS(32, 32),
+                TextAlign = ContentAlignment.MiddleCenter,
+                Margin = Theme.DP(0, 0, Theme.GapSmall, 0),
+            };
+            block.Paint += (_, e) =>
+            {
+                using var path = Theme.RoundRect(new Rectangle(0, 0, block.Width - 1, block.Height - 1), Theme.ButtonRadius);
+                using var fill = new SolidBrush(block.BackColor);
+                e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                e.Graphics.FillPath(fill, path);
+                TextRenderer.DrawText(e.Graphics, block.Text, block.Font, block.ClientRectangle, block.ForeColor,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            };
+            header.Controls.Add(block, 0, 0);
+            header.Controls.Add(head, 1, 0);
+        }
+        else
+        {
+            header.Controls.Add(head, 0, 0);
+            header.SetColumn(head, 0);
+        }
+
         _status = new Label
         {
             Text = "关",
             Font = Theme.Body,
             ForeColor = Theme.TextSecondary,
-            BackColor = Theme.SecondaryBack,
+            BackColor = Theme.ChipBack,
             AutoSize = true,
             Padding = Theme.DP(8, 2, 8, 2),
             Margin = new Padding(0),
         };
-        header.Controls.Add(titleLabel, 0, 0);
-        header.Controls.Add(_status, 1, 0);
+        header.Controls.Add(_status, 2, 0);
 
         _description = Theme.Ellipsis(description);
         _description.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
