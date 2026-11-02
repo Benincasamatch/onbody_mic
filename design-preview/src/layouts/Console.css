@@ -1,0 +1,184 @@
+.console-layout .console-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  min-height: 0;
+  padding: 20px 24px 16px;
+  overflow-y: auto;
+}
+
+.console-layout > .window-header,
+.console-layout > .status-footer {
+  flex-shrink: 0;
+}
+
+.console-layout .page-heading {
+  flex-shrink: 0;
+  margin: 0;
+}
+
+.console-layout .console-demo-label {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.console-layout .console-routes {
+  display: grid;
+  flex-shrink: 0;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.console-layout .console-routes .route-card {
+  min-width: 0;
+  margin: 0;
+}
+
+.console-layout .console-library {
+  display: flex;
+  flex: 1 0 220px;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 220px;
+  padding: 0;
+  overflow: hidden;
+}
+
+.console-layout .console-library-heading {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 10px;
+}
+
+.console-layout .console-library-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.console-layout .console-library-title > svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.console-layout .console-library-title h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.console-layout .console-library-count {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.console-layout .console-utilities {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
+.console-layout .console-utilities .button {
+  gap: 5px;
+  min-height: 28px;
+  padding: 4px 8px;
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+.console-layout .console-library > .library-toolbar {
+  flex-shrink: 0;
+  padding: 0 16px 12px;
+}
+
+.console-layout .console-library > .clip-table-wrap {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  border-top: 1px solid var(--line);
+}
+
+.console-layout .console-playback {
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.console-layout .console-playback > .playback-strip {
+  width: 100%;
+  margin: 0;
+}
+
+@media (max-width: 1100px) {
+  .console-layout .console-body {
+    gap: 10px;
+    padding: 14px 16px 12px;
+  }
+
+
+  .console-layout .console-routes .route-card.compact {
+    padding: 12px;
+  }
+
+  .console-layout .console-library-heading {
+    padding-top: 10px;
+    padding-bottom: 8px;
+  }
+
+  .console-layout .console-library > .library-toolbar {
+    padding-bottom: 8px;
+  }
+}
+
+@media (max-width: 850px) {
+  .console-layout .console-routes {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+}
+
+@media (max-width: 760px) {
+  .console-layout .console-body {
+    padding: 12px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .console-layout .console-demo-label {
+    display: none;
+  }
+
+  .console-layout .console-library {
+    flex: 1 0 280px;
+  }
+
+  .console-layout .console-library-heading {
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 10px 12px 8px;
+  }
+
+  .console-layout .console-utilities {
+    justify-content: flex-start;
+  }
+
+  .console-layout .console-library > .library-toolbar {
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+}
+

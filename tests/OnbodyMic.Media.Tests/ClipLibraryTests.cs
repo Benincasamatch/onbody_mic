@@ -47,6 +47,21 @@ public sealed class ClipLibraryTests : IDisposable
     private ClipLibrary OpenLib(ClipLibraryLimits? limits = null) => ClipLibrary.Open(Path.Combine(_dir, "lib"), _decoder, limits);
 
     [Fact]
+    public void Verbatim_windows_root_keeps_portable_managed_assets_available()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var source = SourceFile("verbatim.wav", "controlled asset bytes");
+        var root = Path.Combine(_dir, "verbatim-lib");
+        using var library = ClipLibrary.Open(@"\\?\" + root, _decoder);
+        var imported = library.Import(source).Item;
+
+        Assert.True(library.IsAvailable(imported.ClipId));
+        Assert.Equal(File.ReadAllText(source), File.ReadAllText(library.AssetAbsolutePath(imported)));
+        using var reopened = ClipLibrary.Open(@"\\?\" + root, _decoder);
+        Assert.True(reopened.IsAvailable(imported.ClipId));
+    }
+
+    [Fact]
     public void Import_validates_copies_asset_and_persists_stable_id()
     {
         var source = SourceFile("beep.wav");

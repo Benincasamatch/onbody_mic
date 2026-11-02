@@ -18,6 +18,7 @@ public sealed class AudioSession : IDisposable
     private readonly SendMixer _mixer;
     private readonly MonitorRouter _monitorRouter;
     private readonly IClipDecoder _decoder;
+    private readonly SemaphoreSlim _decodeSlot = new(1, 1);
 
     private IVirtualAudioOutput? _output;
     private IAudioSourceAdapter? _micAdapter;
@@ -29,6 +30,9 @@ public sealed class AudioSession : IDisposable
     private PresetDeviceConfig? _devices;
     private volatile SessionRuntimeState _runtime;
     private volatile bool _disposed;
+    private long _playRequestId;
+    private bool _pendingClipSend;
+    private bool _clipLoading;
 
     /// <summary>Notices raised by faults and completions; never contains paths or device ids.</summary>
     public event Action<SessionNotice>? Noticed;
@@ -133,11 +137,17 @@ public sealed class AudioSession : IDisposable
 
         TeardownAudioPaths();
         Engine.AbortSession();
+        _appBinding = null;
+        PublishState();
 
         var issues = new List<RouteIssue>();
         if (_options.DeviceValidator is { } validate)
         {
-            issues.AddRange(validate(preset.Devices));
+            try { issues.AddRange(validate(preset.Devices)); }
+            catch (Exception ex)
+            {
+                return PresetApplyResult.Reject($"device-validation-failed: {ex.Message}");
+            }
         }
 
         // commit: config swap, gains, disabled monitor preference, preset id
@@ -174,6 +184,19 @@ public sealed class AudioSession : IDisposable
         return CommandResult.Ok;
     });
 
+    /// <summary>Deletes the active configuration, including its output, live binding and every local/send path.</summary>
+    public CommandResult ClearConfiguration() => _commands.Submit("clear-configuration", () =>
+    {
+        TeardownAudioPaths();
+        var result = Engine.ClearConfiguration();
+        _appBinding = null;
+        _devices = null;
+        _gains = RouteGains.Unity;
+        _output = SafeDispose(_output);
+        PublishState();
+        return result;
+    });
+
     public CommandResult EnableMic(bool enabled) => _commands.Submit($"mic-{(enabled ? "on" : "off")}", () => DoEnableMic(enabled));
 
     public CommandResult EnableExtras(bool enabled) => _commands.Submit($"extras-{(enabled ? "on" : "off")}", () => DoEnableExtras(enabled));
@@ -181,7 +204,7 @@ public sealed class AudioSession : IDisposable
     public CommandResult EnableApp(bool enabled) => _commands.Submit($"app-{(enabled ? "on" : "off")}", () => DoEnableApp(enabled));
 
     /// <summary>Sets the target application binding; refuses while the app route is sending (T08: re-binding is explicit).</summary>
-    public CommandResult BindApplication(AppBinding binding) => _commands.Submit("bind-app", () =>
+    public CommandResult BindApplication(AppBinding binding, AppSelection? selection = null) => _commands.Submit("bind-app", () =>
     {
         if (Engine.Switches.AppSendEnabled)
         {
@@ -190,29 +213,43 @@ public sealed class AudioSession : IDisposable
 
         StopAppCapture();
         _appBinding = binding;
+        if (selection is not null && _devices is not null)
+        {
+            _devices = _devices with { Application = selection };
+        }
         PublishState();
         return CommandResult.Ok;
     });
 
-    public CommandResult PlayClip(string path) => _commands.Submit("play-clip", () => DoStartClip(path, send: true));
+    public CommandResult PlayClip(string path) => PlayClipAsync(path).GetAwaiter().GetResult();
 
-    public CommandResult PreviewClip(string path) => _commands.Submit("preview-clip", () => DoStartClip(path, send: false));
+    public Task<CommandResult> PlayClipAsync(string path) => StartClipAsync(path, send: true);
+
+    public CommandResult PreviewClip(string path) => PreviewClipAsync(path).GetAwaiter().GetResult();
+
+    public Task<CommandResult> PreviewClipAsync(string path) => StartClipAsync(path, send: false);
 
     public CommandResult StopClip() => _commands.Submit("stop-clip", () =>
     {
+        var cancelledLoading = _clipLoading;
+        _clipLoading = false;
+        _playRequestId++;
         var result = Engine.StopClip();
-        _clipPlayer.Stop();
+        _clipPlayer.Discard();
         _clipFeed.SetTicket(null);
         PublishState();
-        return result;
+        ReleaseIdleMonitor();
+        return cancelledLoading ? CommandResult.Ok : result;
     });
 
     public CommandResult SetMonitor(bool enabled, MonitorMode mode) => _commands.Submit("set-monitor", () => DoSetMonitor(enabled, mode));
 
     public CommandResult EmergencyMute() => _commands.Submit("emergency-mute", () =>
     {
+        _clipLoading = false;
+        _playRequestId++;
         var result = Engine.EmergencyMute();
-        _clipPlayer.Stop();
+        _clipPlayer.Discard();
         _clipFeed.SetTicket(null);
         StopMonitorDevices();
         _monitorRouter.Clear();
@@ -248,7 +285,8 @@ public sealed class AudioSession : IDisposable
         Engine.MonitorSuspendedForPreview,
         Engine.MonitorMode,
         _gains,
-        _devices));
+        _devices,
+        _clipLoading));
 
     /// <summary>Desensitized counters; components are safe to read from any thread.</summary>
     public SessionMetrics Metrics() => new(
@@ -265,6 +303,11 @@ public sealed class AudioSession : IDisposable
         _micChannel.Ratio,
         _appChannel.Ratio);
 
+    /// <summary>Consumes recent peaks for the UI; lifetime diagnostics remain unchanged.</summary>
+    public SessionLevels TakeLevels() => new(
+        _mixer.MicLevel.Take(), _mixer.AppLevel.Take(),
+        Math.Max(_mixer.ClipLevel.Take(), _monitorRouter.PreviewLevel.Take()), _mixer.MixLevel.Take());
+
     public void Dispose()
     {
         if (_disposed)
@@ -274,7 +317,7 @@ public sealed class AudioSession : IDisposable
 
         _disposed = true;
         _commands.Dispose();
-        _clipPlayer.Stop();
+        _clipPlayer.Discard();
         _micAdapter = SafeDispose(_micAdapter);
         _appAdapter = SafeDispose(_appAdapter);
         _monitorOutput = SafeDispose(_monitorOutput);
@@ -321,8 +364,12 @@ public sealed class AudioSession : IDisposable
         {
             try
             {
-                _micAdapter = _options.MicAdapterFactory(_devices!.MicDeviceId, _micChannel);
-                _micAdapter.Ended += reason => _commands.Post("mic-ended", () => HandleSourceEnded("mic", reason), urgent: true);
+                var adapter = _options.MicAdapterFactory(_devices!.MicDeviceId, _micChannel);
+                _micAdapter = adapter;
+                adapter.Ended += reason => _commands.Post("mic-ended", () =>
+                {
+                    if (ReferenceEquals(_micAdapter, adapter)) HandleSourceEnded("mic", reason);
+                }, urgent: true);
                 _micAdapter.Start();
             }
             catch (Exception ex)
@@ -347,13 +394,14 @@ public sealed class AudioSession : IDisposable
         var result = Engine.SetExtrasSend(enabled);
         if (result.Accepted && !enabled)
         {
+            if (_pendingClipSend) { _playRequestId++; _clipLoading = false; }
             // docs/06 §1.1: closing extras stops app capture, clears the app and
             // clip send queues and stops the outbound clip; mic and pure-local
             // preview are untouched.
             StopAppCapture();
             if (_clipPlayer.Active is { Mode: ClipPlaybackMode.Send })
             {
-                _clipPlayer.Stop();
+                _clipPlayer.Discard();
             }
 
             _clipFeed.SetTicket(null);
@@ -401,8 +449,12 @@ public sealed class AudioSession : IDisposable
         {
             try
             {
-                _appAdapter = _options.AppAdapterFactory(_appChannel, _appBinding.Value);
-                _appAdapter.Ended += reason => _commands.Post("app-ended", () => HandleSourceEnded("app", reason), urgent: true);
+                var adapter = _options.AppAdapterFactory(_appChannel, _appBinding.Value);
+                _appAdapter = adapter;
+                adapter.Ended += reason => _commands.Post("app-ended", () =>
+                {
+                    if (ReferenceEquals(_appAdapter, adapter)) HandleSourceEnded("app", reason);
+                }, urgent: true);
                 _appAdapter.Start();
             }
             catch (Exception ex)
@@ -422,7 +474,7 @@ public sealed class AudioSession : IDisposable
         return setResult;
     }
 
-    private CommandResult DoStartClip(string clipId, bool send)
+    private CommandResult CheckClipStart(bool send)
     {
         // mirror the engine's preconditions before any file I/O: a rejected
         // trigger must not pay for a decode (docs/01 §5.4 — reject, never queue)
@@ -436,7 +488,53 @@ public sealed class AudioSession : IDisposable
             return CommandResult.Reject("emergency-latched");
         }
 
-        var resolution = _options.ClipResolver?.Invoke(clipId) ?? ClipResolution.Unknown;
+        if (send && Engine.OutputLost) return CommandResult.Reject("output-lost");
+        return CommandResult.Ok;
+    }
+
+    private Task<CommandResult> StartClipAsync(string clipId, bool send)
+    {
+        long requestId = 0;
+        var prepared = _commands.Submit("prepare-clip", () =>
+        {
+            var check = CheckClipStart(send);
+            if (!check.Accepted) return check;
+            requestId = ++_playRequestId;
+            _pendingClipSend = send;
+            _clipLoading = true;
+            return CommandResult.Ok;
+        });
+        if (!prepared.Accepted) return Task.FromResult(prepared);
+
+        return Task.Run(async () =>
+        {
+            await _decodeSlot.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                // Bound decoder memory use and skip superseded requests before I/O.
+                var current = _commands.Submit("check-clip-request", () => requestId == _playRequestId
+                    ? CommandResult.Ok : CommandResult.Reject("clip-start-cancelled"));
+                return current.Accepted ? DecodeAndStartClip(clipId, send, requestId) : current;
+            }
+            finally
+            {
+                _decodeSlot.Release();
+                _commands.Submit("clip-load-finished", () =>
+                {
+                    if (requestId == _playRequestId) _clipLoading = false;
+                    return CommandResult.Ok;
+                });
+            }
+        });
+    }
+
+    private CommandResult DecodeAndStartClip(string clipId, bool send, long requestId)
+    {
+        // Decode on the caller's worker, never the session command thread.
+        // Mute, stop, status and preset changes remain available during I/O.
+        ClipResolution resolution;
+        try { resolution = _options.ClipResolver?.Invoke(clipId) ?? ClipResolution.Unknown; }
+        catch (Exception ex) { return CommandResult.Reject($"decode-failed: {ex.Message}"); }
         if (resolution.Known && !resolution.Available)
         {
             return CommandResult.Reject($"clip-unavailable:{clipId}");
@@ -468,6 +566,30 @@ public sealed class AudioSession : IDisposable
             }
         }
 
+        return _commands.Submit("start-decoded-clip", () =>
+        {
+            if (requestId != _playRequestId) return CommandResult.Reject("clip-start-cancelled");
+            var check = CheckClipStart(send);
+            if (!check.Accepted) return check;
+            return StartDecodedClip(clipId, send, samples, resolution.Gain);
+        });
+    }
+
+    private CommandResult StartDecodedClip(string clipId, bool send, float[] samples, float gain)
+    {
+        if (!send)
+        {
+            if (string.IsNullOrWhiteSpace(_devices?.MonitorDeviceId))
+                return CommandResult.Reject("monitor-device-unconfigured");
+
+            try { EnsureMonitorOutput(); }
+            catch (Exception ex)
+            {
+                _monitorOutput = SafeDispose(_monitorOutput);
+                return CommandResult.Reject($"monitor-start-failed: {ex.Message}");
+            }
+        }
+
         var result = send ? Engine.PlayClip(clipId) : Engine.PreviewClip(clipId);
         if (!result.Accepted)
         {
@@ -475,13 +597,14 @@ public sealed class AudioSession : IDisposable
         }
 
         var active = Engine.Clip!;
-        _clipPlayer.Start(active.ClipId, samples, active.PlaybackEpoch, active.Mode, resolution.Gain);
+        _clipPlayer.Start(active.ClipId, samples, active.PlaybackEpoch, active.Mode, gain);
         // preview deliberately carries no send ticket: the mixer denies and
         // drains it, so auditions can never reach the virtual output
         _clipFeed.SetTicket(active.Mode == ClipPlaybackMode.Send
             ? new SourceTicket("clip", AudioKind.Clip, Engine.SessionEpoch, active.PlaybackEpoch)
             : null);
         PublishState();
+        ReleaseIdleMonitor();
         return CommandResult.Ok;
     }
 
@@ -510,21 +633,25 @@ public sealed class AudioSession : IDisposable
             {
                 if (mode == MonitorMode.FullEndpoint && _monitorCapture is null)
                 {
-                    _monitorCapture = _options.MonitorCaptureFactory!(_devices!.VirtualCaptureDeviceId!, _monitorRouter);
-                    _monitorCapture.Faulted += ex => _commands.Post("monitor-faulted", () => HandleMonitorFaulted(ex), urgent: true);
+                    var capture = _options.MonitorCaptureFactory!(_devices!.VirtualCaptureDeviceId!, _monitorRouter);
+                    _monitorCapture = capture;
+                    capture.Faulted += ex => _commands.Post("monitor-faulted", () =>
+                    {
+                        if (ReferenceEquals(_monitorCapture, capture)) HandleMonitorFaulted(ex);
+                    }, urgent: true);
                     _monitorCapture.Start(_monitorRouter.PushFullEndpoint);
                 }
-
-                if (_monitorOutput is null)
+                else if (mode != MonitorMode.FullEndpoint)
                 {
-                    _monitorOutput = _options.MonitorOutputFactory(_devices!.MonitorDeviceId);
-                    _monitorOutput.Faulted += ex => _commands.Post("monitor-faulted", () => HandleMonitorFaulted(ex), urgent: true);
-                    _monitorOutput.Start(_monitorRouter.Read);
+                    _monitorCapture = SafeDispose(_monitorCapture);
                 }
+
+                EnsureMonitorOutput();
             }
             else
             {
-                StopMonitorDevices();
+                _monitorCapture = SafeDispose(_monitorCapture);
+                ReleaseIdleMonitor();
             }
         }
         catch (Exception ex)
@@ -577,6 +704,9 @@ public sealed class AudioSession : IDisposable
         }
 
         _ = Engine.OutputFailed();
+        if (_pendingClipSend) { _playRequestId++; _clipLoading = false; }
+        if (_clipPlayer.Active is { Mode: ClipPlaybackMode.Send }) _clipPlayer.Discard();
+        _clipFeed.SetTicket(null);
         _output = SafeDispose(_output);
         PublishState();
         Notice(SessionNoticeKind.OutputFaulted, $"virtual output faulted: {exception.Message}");
@@ -590,6 +720,11 @@ public sealed class AudioSession : IDisposable
         }
 
         _ = Engine.SetMonitor(false, Engine.MonitorMode);
+        if (Engine.Clip is { Mode: ClipPlaybackMode.Preview })
+        {
+            Engine.StopClip();
+            _clipPlayer.Discard();
+        }
         StopMonitorDevices();
         PublishState();
         Notice(SessionNoticeKind.MonitorFaulted, $"monitor faulted: {exception.Message}");
@@ -597,7 +732,7 @@ public sealed class AudioSession : IDisposable
 
     private void HandleClipCompleted(ActiveClip clip)
     {
-        if (_disposed)
+        if (_disposed || Engine.Clip != clip)
         {
             return;
         }
@@ -614,6 +749,7 @@ public sealed class AudioSession : IDisposable
         }
 
         PublishState();
+        ReleaseIdleMonitor();
     }
 
     // ---- helpers ----
@@ -643,15 +779,39 @@ public sealed class AudioSession : IDisposable
     /// <summary>Creates and starts the output pump for the currently configured render endpoint; caller owns error handling.</summary>
     private void StartOutput()
     {
-        _output = _options.OutputFactory(_devices!.VirtualRenderDeviceId);
-        _output.Faulted += ex => _commands.Post("output-faulted", () => HandleOutputFaulted(ex), urgent: true);
+        var output = _options.OutputFactory(_devices!.VirtualRenderDeviceId);
+        _output = output;
+        output.Faulted += ex => _commands.Post("output-faulted", () =>
+        {
+            if (ReferenceEquals(_output, output)) HandleOutputFaulted(ex);
+        }, urgent: true);
         _output.Start(MixPull);
+    }
+
+    private void EnsureMonitorOutput()
+    {
+        if (_monitorOutput is not null) return;
+        var output = _options.MonitorOutputFactory(_devices!.MonitorDeviceId);
+        _monitorOutput = output;
+        output.Faulted += ex => _commands.Post("monitor-faulted", () =>
+        {
+            if (ReferenceEquals(_monitorOutput, output)) HandleMonitorFaulted(ex);
+        }, urgent: true);
+        output.Start(_monitorRouter.Read);
+    }
+
+    private void ReleaseIdleMonitor()
+    {
+        if (!Engine.Switches.MonitorEnabled && Engine.Clip is not { Mode: ClipPlaybackMode.Preview })
+            StopMonitorDevices();
     }
 
     /// <summary>Stops every live audio path except the output pump; engine state changes happen in the engine.</summary>
     private void TeardownAudioPaths()
     {
-        _clipPlayer.Stop();
+        _clipLoading = false;
+        _playRequestId++;
+        _clipPlayer.Discard();
         _clipFeed.SetTicket(null);
         _micChannel.SetTicket(null);
         _micAdapter = SafeDispose(_micAdapter);

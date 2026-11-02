@@ -89,7 +89,6 @@ internal sealed class AppShell : IDisposable
         var issues = new List<RouteIssue>();
         var all = WindowsAudioDevices.List(activeOnly: false);
         var activeIds = all.Where(d => d.State == "Active").Select(d => d.Id).ToHashSet(StringComparer.Ordinal);
-        var presentIds = all.Select(d => d.Id).ToHashSet(StringComparer.Ordinal);
 
         void Check(string? id, PresetRoute route)
         {
@@ -98,7 +97,14 @@ internal sealed class AppShell : IDisposable
                 return;
             }
 
-            issues.Add(new RouteIssue(route, presentIds.Contains(id) ? "endpoint-disabled" : "endpoint-missing"));
+            var reason = all.FirstOrDefault(d => d.Id == id)?.State switch
+            {
+                "Disabled" => "endpoint-disabled",
+                "Unplugged" => "endpoint-unplugged",
+                "NotPresent" => "endpoint-not-present",
+                _ => "endpoint-missing",
+            };
+            issues.Add(new RouteIssue(route, reason));
         }
 
         Check(config.MicDeviceId, PresetRoute.Microphone);

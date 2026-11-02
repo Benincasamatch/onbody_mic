@@ -16,9 +16,11 @@ internal sealed class AppPickerForm : Form
     private readonly Button _cancel;
     private readonly Label _status;
     private List<WindowsAppCatalog.AppInstance> _instances = [];
+    private readonly string? _savedPath;
 
     public AppPickerForm(AppShell shell)
     {
+        _savedPath = shell.Session.Status().Devices?.Application?.ExecutablePath;
         Theme.InitializeFor(this);
         AutoScaleMode = AutoScaleMode.None;
         Font = Theme.Body;
@@ -91,6 +93,7 @@ internal sealed class AppPickerForm : Form
     {
         _ok.Enabled = false;
         var list = await Task.Run(EnumerateProcesses);
+        if (IsDisposed) return;
         _instances = list;
         _list.BeginUpdate();
         try
@@ -100,6 +103,8 @@ internal sealed class AppPickerForm : Form
             {
                 _list.Items.Add(new Row(instance));
             }
+            _list.SelectedIndex = list.FindIndex(instance => string.Equals(
+                instance.ExecutablePath, _savedPath, StringComparison.OrdinalIgnoreCase));
         }
         finally
         {

@@ -15,6 +15,8 @@ public interface ISendFeed
 
     int Pull(float[] destination, int frames);
 
+    int Pull(float[] destination, int frames, SourceTicket authorizedTicket) => Pull(destination, frames);
+
     int Drain(int frames);
 }
 

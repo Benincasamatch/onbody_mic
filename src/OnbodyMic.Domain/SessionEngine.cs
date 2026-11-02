@@ -296,6 +296,16 @@ public sealed class SessionEngine
         return CommandResult.Ok;
     }
 
+    /// <summary>Revokes the selected configuration and all old source epochs without releasing an emergency latch.</summary>
+    public CommandResult ClearConfiguration()
+    {
+        AbortSession();
+        LastPresetId = null;
+        OutputLost = false;
+        ConfigureMonitorPreference(MonitorMode.ClipOnly);
+        return CommandResult.Ok;
+    }
+
     public CommandResult SwitchPreset(string presetId)
     {
         if (string.IsNullOrWhiteSpace(presetId))

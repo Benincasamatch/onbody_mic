@@ -19,6 +19,8 @@ internal static class Program
         RootOverride = root;
         if (args.Contains("--selftest"))
         {
+            SmokeShots.OutputDirectory = ArgValue(args, "--shots")
+                ?? (root is null ? null : Path.Combine(Path.GetFullPath(root), "shots"));
             return SelfTest(root);
         }
 

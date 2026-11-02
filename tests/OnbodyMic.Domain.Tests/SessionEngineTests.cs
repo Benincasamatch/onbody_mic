@@ -224,6 +224,32 @@ public sealed class SessionEngineTests
         Assert.NotEqual(SessionPhase.OutputLost, engine.Phase);
     }
 
+    [Fact]
+    public void Clear_configuration_keeps_the_emergency_latch_and_old_tickets_cannot_revive_after_unlock()
+    {
+        var engine = Ready();
+        engine.SetMicSend(true);
+        var ticket = Authorize(engine, "mic", AudioKind.Microphone);
+        engine.SetMonitor(true, MonitorMode.FullEndpoint);
+        engine.PreviewClip("preview");
+        engine.OutputFailed();
+        engine.EmergencyMute();
+
+        Assert.True(engine.ClearConfiguration().Accepted);
+
+        Assert.Null(engine.LastPresetId);
+        Assert.False(engine.DevicesValidated);
+        Assert.False(engine.OutputLost);
+        Assert.True(engine.EmergencyLatched);
+        Assert.Equal(SessionSwitches.AllOff, engine.Switches);
+        Assert.Null(engine.Clip);
+        Assert.False(engine.MonitorSuspendedForPreview);
+        Assert.Equal(MonitorMode.ClipOnly, engine.MonitorMode);
+        Assert.True(engine.UnlockEmergency().Accepted);
+        Assert.Equal(SessionPhase.Unconfigured, engine.Phase);
+        Assert.Equal(SendDenialReason.StaleSessionEpoch, engine.Gate.Decide(ticket, engine.Snapshot()).Reason);
+    }
+
     private static SessionEngine Ready()
     {
         var engine = new SessionEngine();

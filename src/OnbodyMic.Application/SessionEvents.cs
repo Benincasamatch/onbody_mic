@@ -10,6 +10,8 @@ public enum SessionNoticeKind
     ClipCompleted = 5,
 }
 
+public readonly record struct SessionLevels(float Mic, float App, float Clip, float Mix);
+
 /// <summary>Desensitized notice for UI/logging: no paths, device ids or audio content.</summary>
 public readonly record struct SessionNotice(SessionNoticeKind Kind, string Message);
 
@@ -26,7 +28,8 @@ public sealed record SessionStatus(
     bool MonitorSuspendedForPreview,
     MonitorMode MonitorMode,
     RouteGains Gains,
-    PresetDeviceConfig? Devices);
+    PresetDeviceConfig? Devices,
+    bool ClipLoading = false);
 
 /// <summary>Desensitized counters for the metrics panel.</summary>
 public sealed record SessionMetrics(

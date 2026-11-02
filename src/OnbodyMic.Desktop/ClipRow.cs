@@ -92,10 +92,13 @@ internal sealed class ClipRow : TableLayoutPanel
         _hotkeyButton.Click += (_, _) => { select(this); editHotkey(this); };
 
         var previewButton = SmallButton("▶");
+        previewButton.Enabled = available;
+        previewButton.AccessibleName = $"本地试听 {item.DisplayName}";
         previewButton.Width = Theme.D(34);
         previewButton.Click += (_, _) => { select(this); preview(this); };
 
         var sendButton = Theme.AirButton("发送");
+        sendButton.Enabled = available;
         sendButton.Font = Theme.Body;
         sendButton.MinimumSize = Theme.DS(64, 28);
         sendButton.Padding = Theme.DP(10, 2, 10, 2);
@@ -118,11 +121,14 @@ internal sealed class ClipRow : TableLayoutPanel
         Controls.Add(moreButton, 8, 0);
 
         Click += (_, _) => select(this);
-        _name.Click += (_, _) => select(this);
-        _state.Click += (_, _) => select(this);
+        foreach (var cell in Controls.OfType<Label>().Where(cell => cell != _star))
+        {
+            cell.Click += (_, _) => select(this);
+            cell.DoubleClick += (_, _) => { select(this); if (available) send(this); };
+        }
         _star.MouseEnter += (_, _) => _star.ForeColor = item.Favorite ? Theme.Warning : Theme.Accent;
         _star.MouseLeave += (_, _) => _star.ForeColor = item.Favorite ? Theme.Warning : Theme.TextSecondary;
-        DoubleClick += (_, _) => { select(this); send(this); };
+        DoubleClick += (_, _) => { select(this); if (available) send(this); };
 
         if (!available)
         {

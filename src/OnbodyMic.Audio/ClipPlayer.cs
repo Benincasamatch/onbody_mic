@@ -32,6 +32,7 @@ public sealed class ClipPlayer
     private float[] _crossfadeSamples = [];
     private int _crossfadePosition;
     private int _crossfadeRemaining;
+    private float _crossfadeGain;
 
     public ClipPlayer(int fadeFrames = DefaultFadeFrames)
     {
@@ -57,14 +58,16 @@ public sealed class ClipPlayer
     {
         lock (_gate)
         {
+            ClearCrossfade();
             if (_active is not null)
             {
                 _replacedPlaybacks++;
-                if (_fadeFrames > 0 && _position < _samples.Length)
+                if (!_stopping && _active.Mode == mode && _fadeFrames > 0 && _position < _samples.Length)
                 {
                     _crossfadeSamples = _samples;
                     _crossfadePosition = _position;
                     _crossfadeRemaining = _fadeFrames;
+                    _crossfadeGain = _gain;
                 }
                 else
                 {
@@ -88,6 +91,7 @@ public sealed class ClipPlayer
         {
             if (_active is null)
             {
+                ClearCrossfade();
                 return;
             }
 
@@ -108,13 +112,27 @@ public sealed class ClipPlayer
         }
     }
 
+    /// <summary>Revokes all material immediately when its route/session is closed.</summary>
+    public void Discard()
+    {
+        lock (_gate) { ClearAll(); }
+    }
+
     /// <summary>Reads up to <paramref name="frames"/> frames and advances the playhead.</summary>
-    public int Read(float[] destination, int frames)
+    public int Read(float[] destination, int frames, ClipPlaybackMode? requiredMode = null, long? requiredEpoch = null)
     {
         ActiveClip? finished = null;
         int taken;
         lock (_gate)
         {
+            // Check the route under the same lock as the read: a monitor/send
+            // pump may have captured its ticket just before a replacement.
+            if ((requiredMode is not null && _active?.Mode != requiredMode)
+                || (requiredEpoch is not null && _active?.PlaybackEpoch != requiredEpoch))
+            {
+                Array.Clear(destination, 0, frames);
+                return 0;
+            }
             if (_active is null)
             {
                 // a crossfade tail can still sound after the new clip ended
@@ -130,6 +148,7 @@ public sealed class ClipPlayer
             }
 
             taken = Math.Min(frames, _samples.Length - _position);
+            if (_stopping) taken = Math.Min(taken, _fadeOutRemaining);
             var boundaryActive = _fadeInRemaining > 0
                 || _stopping
                 || _crossfadeRemaining > 0
@@ -183,7 +202,7 @@ public sealed class ClipPlayer
                     _completedPlaybacks++;
                 }
 
-                ClearAll();
+                ClearAll(preserveCrossfade: !_stopping);
             }
         }
 
@@ -208,7 +227,7 @@ public sealed class ClipPlayer
                 return;
             }
 
-            destination[i] += _crossfadeSamples[index] * (float)(_crossfadeRemaining - i) / _fadeFrames;
+            destination[i] += _crossfadeSamples[index] * _crossfadeGain * (float)(_crossfadeRemaining - i) / _fadeFrames;
         }
 
         _crossfadePosition += count;
@@ -230,8 +249,17 @@ public sealed class ClipPlayer
         }
     }
 
-    private void ClearAll()
+    private void ClearCrossfade()
     {
+        _crossfadeSamples = [];
+        _crossfadePosition = 0;
+        _crossfadeRemaining = 0;
+        _crossfadeGain = 0;
+    }
+
+    private void ClearAll(bool preserveCrossfade = false)
+    {
+        if (!preserveCrossfade) ClearCrossfade();
         _active = null;
         _position = 0;
         _samples = [];
@@ -304,7 +332,18 @@ public sealed class ClipFeed : ISendFeed
 
     public int Pull(float[] destination, int frames)
     {
-        var taken = Player.Read(destination, frames);
+        var ticket = Ticket;
+        if (ticket is null)
+        {
+            Array.Clear(destination, 0, frames);
+            return 0;
+        }
+        return Pull(destination, frames, ticket);
+    }
+
+    public int Pull(float[] destination, int frames, SourceTicket authorizedTicket)
+    {
+        var taken = Player.Read(destination, frames, ClipPlaybackMode.Send, authorizedTicket.SourceEpoch);
         lock (_gate)
         {
             for (var i = 0; i < taken; i++)

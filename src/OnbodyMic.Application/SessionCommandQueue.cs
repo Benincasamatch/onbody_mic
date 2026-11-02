@@ -24,7 +24,10 @@ public sealed class SessionCommandQueue : IDisposable
 
     /// <summary>Enqueues and blocks until the command ran on the session thread.</summary>
     public CommandResult Submit(string name, Func<CommandResult> execute, bool urgent = false)
-        => SubmitValue(name, execute, urgent);
+    {
+        try { return SubmitValue(name, execute, urgent); }
+        catch (Exception ex) { return CommandResult.Reject(ex.Message); }
+    }
 
     /// <summary>Enqueues a value-returning command and blocks for the result.</summary>
     public T SubmitValue<T>(string name, Func<T> execute, bool urgent = false)
@@ -42,11 +45,13 @@ public sealed class SessionCommandQueue : IDisposable
     {
         lock (_gate)
         {
+            // Device callbacks can race shutdown. There is no caller waiting
+            // on a Post, so late events are simply no longer relevant.
+            if (_disposed && waiter is null) return;
             ObjectDisposedException.ThrowIf(_disposed, this);
             (urgent ? _urgent : _normal).Enqueue(new Command(name, execute, waiter));
+            _signal.Release();
         }
-
-        _signal.Release();
     }
 
     private void Run()
@@ -80,17 +85,17 @@ public sealed class SessionCommandQueue : IDisposable
                 continue;
             }
 
-            object? result;
             try
             {
-                result = command.Execute();
+                var result = command.Execute();
+                command.Waiter?.TrySetResult(result);
             }
             catch (Exception ex)
             {
-                result = CommandResult.Reject(ex.Message);
+                // A status/preset result is not a CommandResult. Preserve the
+                // actual exception instead of causing a misleading cast error.
+                command.Waiter?.TrySetException(ex);
             }
-
-            command.Waiter?.TrySetResult(result ?? CommandResult.Ok);
         }
     }
 
@@ -107,7 +112,8 @@ public sealed class SessionCommandQueue : IDisposable
         }
 
         _cancel.Cancel();
-        _thread.Join(1000);
+        // Do not let audio teardown race a command still using its adapters.
+        _thread.Join();
         TaskCompletionSource<object?>[] waiters;
         lock (_gate)
         {
@@ -119,7 +125,10 @@ public sealed class SessionCommandQueue : IDisposable
 
         foreach (var waiter in waiters)
         {
-            waiter.TrySetResult(CommandResult.Ok);
+            waiter.TrySetException(new ObjectDisposedException(nameof(SessionCommandQueue)));
         }
+
+        _signal.Dispose();
+        _cancel.Dispose();
     }
 }

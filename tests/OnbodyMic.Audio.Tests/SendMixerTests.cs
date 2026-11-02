@@ -8,6 +8,24 @@ public sealed class SendMixerTests
     private const int Epoch = 1;
 
     [Fact]
+    public void Route_meters_are_independent_and_silence_recovers_after_polling()
+    {
+        var mic = new SourceChannel("mic", AudioKind.Microphone, 100);
+        mic.SetTicket(new SourceTicket("mic", AudioKind.Microphone, Epoch, 1));
+        mic.Push(new float[] { .6f, .6f });
+        var mixer = Build(SessionSwitches.AllOff with { MicSendEnabled = true }, null);
+        mixer.Add(mic);
+        mixer.Read(new float[2]);
+        Assert.Equal(.6f, mixer.MicLevel.Take());
+        Assert.Equal(0, mixer.ClipLevel.Take());
+        Assert.Equal(.6f, mixer.MixLevel.Take());
+        mixer.Read(new float[2]);
+        Assert.Equal(0, mixer.MicLevel.Take());
+        Assert.Equal(0, mixer.MixLevel.Take());
+        Assert.Equal(.6f, mixer.Peak); // diagnostic history is preserved
+    }
+
+    [Fact]
     public void Denied_feed_is_drained_and_never_replayed()
     {
         var mic = new SourceChannel("mic", AudioKind.Microphone, 100);

@@ -6,6 +6,68 @@ using Xunit;
 public sealed class ClipPlayerTests
 {
     [Fact]
+    public void Stop_does_not_resume_at_full_volume_in_a_large_audio_period()
+    {
+        var player = new ClipPlayer(fadeFrames: 4);
+        player.Start("old", Filled(64, 1), 1, ClipPlaybackMode.Send);
+        player.Read(new float[8], 8);
+        player.Stop();
+        var output = new float[16];
+        Assert.Equal(4, player.Read(output, output.Length));
+        Assert.All(output[4..], sample => Assert.Equal(0, sample));
+    }
+
+    [Fact]
+    public void Crossfade_preserves_the_previous_material_gain()
+    {
+        var player = new ClipPlayer(fadeFrames: 4);
+        player.Start("quiet", Filled(64, 1), 1, ClipPlaybackMode.Send, gain: .1f);
+        player.Read(new float[8], 8);
+        player.Start("silent", new float[64], 2, ClipPlaybackMode.Send);
+        var output = new float[8];
+        player.Read(output, output.Length);
+        Assert.All(output, sample => Assert.InRange(sample, 0, .1f));
+    }
+
+    [Fact]
+    public void Stale_send_ticket_cannot_consume_a_preview_or_replacement()
+    {
+        var player = new ClipPlayer(fadeFrames: 0);
+        var feed = new ClipFeed(player, 64, 32);
+        feed.SetTicket(new SourceTicket("clip", AudioKind.Clip, 0, 1));
+        player.Start("private", Filled(64, .8f), 1, ClipPlaybackMode.Preview);
+        Assert.Equal(0, feed.Pull(new float[8], 8));
+        player.Start("new", Filled(64, .8f), 2, ClipPlaybackMode.Send);
+        Assert.Equal(0, feed.Pull(new float[8], 8));
+        Assert.Equal(0, player.Stats().PositionFrames);
+    }
+
+    [Fact]
+    public void Preview_tail_cannot_crossfade_into_a_send_playback()
+    {
+        var player = new ClipPlayer(fadeFrames: 4);
+        player.Start("private-preview", Filled(64, 0.8f), 1, ClipPlaybackMode.Preview);
+        player.Read(new float[8], 8);
+        player.Start("silent-send", new float[64], 2, ClipPlaybackMode.Send);
+        var sent = new float[8];
+        player.Read(sent, sent.Length);
+        Assert.All(sent, sample => Assert.Equal(0, sample));
+    }
+
+    [Fact]
+    public void Stopped_material_cannot_reappear_when_a_new_clip_starts()
+    {
+        var player = new ClipPlayer(fadeFrames: 4);
+        player.Start("old", Filled(64, 0.8f), 1, ClipPlaybackMode.Send);
+        player.Read(new float[8], 8);
+        player.Stop(); // no subsequent pull while the send gate is closed
+        player.Start("silent-new", new float[64], 2, ClipPlaybackMode.Send);
+        var sent = new float[8];
+        player.Read(sent, sent.Length);
+        Assert.All(sent, sample => Assert.Equal(0, sample));
+    }
+
+    [Fact]
     public void New_target_replaces_old_and_retrigger_restarts()
     {
         var player = new ClipPlayer(fadeFrames: 0);

@@ -52,6 +52,11 @@ public sealed class SendMixer
 
     public float Peak { get; private set; }
 
+    public PeakAccumulator MicLevel { get; } = new();
+    public PeakAccumulator AppLevel { get; } = new();
+    public PeakAccumulator ClipLevel { get; } = new();
+    public PeakAccumulator MixLevel { get; } = new();
+
     public void Read(Span<float> destination)
     {
         destination.Clear();
@@ -71,7 +76,7 @@ public sealed class SendMixer
             }
 
             var wasShort = _shortFeeds.Contains(feed);
-            var available = feed.Pull(_scratch, frames);
+            var available = feed.Pull(_scratch, frames, ticket);
             if (available < frames)
             {
                 UnderrunFrames += frames - available;
@@ -110,13 +115,23 @@ public sealed class SendMixer
                     _ => 0f,
                 };
 
+                var routePeak = 0f;
                 for (var i = 0; i < available; i++)
                 {
                     destination[i] += _scratch[i] * gain;
+                    routePeak = Math.Max(routePeak, Math.Abs(_scratch[i] * gain));
                 }
+                var meter = feed.Kind switch
+                {
+                    AudioKind.Microphone => MicLevel,
+                    AudioKind.Application => AppLevel,
+                    _ => ClipLevel,
+                };
+                meter.Record(routePeak);
             }
         }
 
+        var blockPeak = 0f;
         for (var i = 0; i < destination.Length; i++)
         {
             if (i > 0
@@ -129,6 +144,7 @@ public sealed class SendMixer
 
             var value = destination[i];
             var magnitude = Math.Abs(value);
+            blockPeak = Math.Max(blockPeak, magnitude);
             if (magnitude > Peak)
             {
                 Peak = magnitude;
@@ -148,5 +164,6 @@ public sealed class SendMixer
         }
 
         FramesMixed += frames;
+        MixLevel.Record(blockPeak);
     }
 }

@@ -70,9 +70,9 @@ internal sealed class FirstRunWizard : Form
 
         Fill(_micCombo, capture: true, preferred: "麦克风");
         Field("真实麦克风", _micCombo);
-        Fill(_renderCombo, capture: false, preferred: "Steam");
+        Fill(_renderCombo, capture: false, preferred: "Steam", requirePreferred: true);
         Field("虚拟输出（线缆 Render，独占写入）", _renderCombo);
-        Fill(_cableCombo, capture: true, preferred: "Steam", optional: "（暂不配置）");
+        Fill(_cableCombo, capture: true, preferred: "Steam", optional: "（暂不配置）", requirePreferred: true);
         Field("虚拟麦 Capture（实际端点监听用，可暂空）", _cableCombo);
         Fill(_monitorCombo, capture: false, preferred: null);
         Field("监听输出（耳机）", _monitorCombo);
@@ -117,7 +117,7 @@ internal sealed class FirstRunWizard : Form
         _okButton.Click += (_, _) => CreateAndApply();
     }
 
-    private static void Fill(ComboBox combo, bool capture, string? preferred, string? optional = null)
+    private static void Fill(ComboBox combo, bool capture, string? preferred, string? optional = null, bool requirePreferred = false)
     {
         combo.Items.Clear();
         var defaultId = WindowsAudioDevices.DefaultDeviceId(capture);
@@ -129,6 +129,7 @@ internal sealed class FirstRunWizard : Form
             .Where(d => d.DataFlow == (capture ? "Capture" : "Render"))
             .ToList();
         var preferredIndex = -1;
+        var fallbackIndex = -1;
         foreach (var endpoint in endpoints)
         {
             var isDefault = endpoint.Id == defaultId;
@@ -141,6 +142,8 @@ internal sealed class FirstRunWizard : Form
             {
                 continue;
             }
+
+            if (fallbackIndex < 0 || isDefault) fallbackIndex = combo.Items.Count - 1;
 
             if (preferred is not null && endpoint.FriendlyName.Contains(preferred, StringComparison.OrdinalIgnoreCase)
                 && preferredIndex < 0)
@@ -160,7 +163,9 @@ internal sealed class FirstRunWizard : Form
             combo.Items.Add(optional);
         }
 
-        combo.SelectedIndex = preferredIndex >= 0 ? preferredIndex : combo.Items.Count > 0 ? 0 : -1;
+        combo.SelectedIndex = preferredIndex >= 0 ? preferredIndex
+            : optional is not null ? combo.Items.Count - 1
+            : requirePreferred ? -1 : fallbackIndex;
     }
 
     private void CreateAndApply()
@@ -174,6 +179,21 @@ internal sealed class FirstRunWizard : Form
         }
 
         var cable = _cableCombo.SelectedItem as EndpointRow;
+        if (!mic.Active || !render.Active || !monitor.Active || cable is { Active: false })
+        {
+            MessageBox.Show(this, "所选设备当前不可用。请连接设备或在 Windows 声音设置中启用，再重新配置。也可跳过引导，在主窗口的「设备设置…」中处理。", "随声麦");
+            return;
+        }
+        if (render.Endpoint.Id == monitor.Endpoint.Id)
+        {
+            MessageBox.Show(this, "监听输出请选择实际耳机或扬声器，不能与虚拟输出使用同一端点。", "随声麦");
+            return;
+        }
+        if (_monitorMode.SelectedIndex == 1 && cable is null)
+        {
+            MessageBox.Show(this, "实际虚拟麦监听需要选择 Capture 端点，或先使用「仅音效」。", "随声麦");
+            return;
+        }
         var config = new PresetConfig(
             _shell.PresetStore.NewId(),
             string.IsNullOrWhiteSpace(_nameBox.Text) ? "开黑默认" : _nameBox.Text.Trim(),
@@ -205,19 +225,20 @@ internal sealed class FirstRunWizard : Form
             return;
         }
 
+        if (applied.Issues.Count > 0 || applied.OutputAttachRejection is not null)
+        {
+            MessageBox.Show(this, "预设已保存，但部分设备尚不可用。请在主窗口「设备设置…」中检查后重新应用。\n"
+                + applied.OutputAttachRejection, "随声麦", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
         DialogResult = DialogResult.OK;
         Close();
     }
 
     private sealed record EndpointRow(AudioEndpointInfo Endpoint, bool IsDefault, bool Active)
     {
-        public bool Disabled => !Active;
-
-        public override string ToString() => (IsDefault, Disabled) switch
-        {
-            (true, false) => $"{Endpoint.FriendlyName}（当前系统默认）",
-            (false, true) => $"{Endpoint.FriendlyName}（已禁用 — 创建后到「设备设置…」启用）",
-            _ => Endpoint.FriendlyName,
-        };
+        public override string ToString() => !Active
+            ? $"{Endpoint.FriendlyName}（{DeviceCatalog.StateLabel(Endpoint)}）"
+            : IsDefault ? $"{Endpoint.FriendlyName}（当前系统默认）" : Endpoint.FriendlyName;
     }
 }

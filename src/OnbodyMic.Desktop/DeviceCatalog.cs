@@ -116,6 +116,15 @@ internal sealed class DeviceCatalog
 
     public static bool IsActive(AudioEndpointInfo device) => device.State == "Active";
 
+    public static string StateLabel(AudioEndpointInfo device) => device.State switch
+    {
+        "Active" => "可用",
+        "Disabled" => "已禁用，可在设备设置中启用",
+        "Unplugged" => "未连接，请检查插头或连接",
+        "NotPresent" => "当前不在场，请重新连接或选择其他设备",
+        _ => $"不可用：{device.State}",
+    };
+
     /// <summary>
     /// Enables a disabled endpoint through IPolicyConfig, then rescans so every
     /// surface sees the new state. Returns false with a reason on failure —

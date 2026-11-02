@@ -42,6 +42,10 @@ public sealed class HotkeyDispatcher : IDisposable
     private readonly Func<string, bool>? _presetExists;
     private readonly Func<string, PresetApplyResult>? _presetApplier;
     private volatile bool _suspended;
+    private volatile bool _disposed;
+
+    /// <summary>Completion of the latest playback activation; the OS pump never waits for decoding.</summary>
+    public Task LastPlayback { get; private set; } = Task.CompletedTask;
 
     public HotkeyDispatcher(
         AudioSession session,
@@ -119,6 +123,7 @@ public sealed class HotkeyDispatcher : IDisposable
 
     private void OnTriggered(HotkeyTrigger trigger)
     {
+        if (_disposed) return;
         var binding = trigger.Binding;
         try
         {
@@ -131,7 +136,7 @@ public sealed class HotkeyDispatcher : IDisposable
             switch (binding.Action)
             {
                 case HotkeyAction.PlayClip:
-                    DispatchPlay(binding.TargetId!);
+                    LastPlayback = DispatchPlayAsync(binding.TargetId!);
                     break;
                 case HotkeyAction.StopClip:
                     _ = _session.StopClip();
@@ -175,26 +180,28 @@ public sealed class HotkeyDispatcher : IDisposable
         }
     }
 
-    private void DispatchPlay(string clipId)
+    private async Task DispatchPlayAsync(string clipId)
     {
-        if (_clipResolver is not null)
+        try
         {
-            var resolution = _clipResolver(clipId);
-            if (!resolution.Known || !resolution.Available)
+            if (_clipResolver is not null)
             {
-                // hotkeys target stable library ids; a dangling or unavailable
-                // entry is refused, never forwarded as a raw path decode
-                Notice($"hotkey clip unavailable: {clipId}");
-                return;
+                var resolution = _clipResolver(clipId);
+                if (!resolution.Known || !resolution.Available)
+                {
+                    // A dangling library entry must never become a raw path decode.
+                    Notice($"hotkey clip unavailable: {clipId}");
+                    return;
+                }
+            }
+
+            var result = await _session.PlayClipAsync(clipId).ConfigureAwait(false);
+            if (!result.Accepted && result.Rejection != "clip-start-cancelled")
+            {
+                Notice($"hotkey play rejected ({result.Rejection}): {clipId}");
             }
         }
-
-        var result = _session.PlayClip(clipId);
-        if (!result.Accepted)
-        {
-            // docs/01 §5.4: rejected, not queued — the user must see why
-            Notice($"hotkey play rejected ({result.Rejection}): {clipId}");
-        }
+        catch (Exception ex) { Notice($"hotkey dispatch failed: {ex.Message}"); }
     }
 
     private void Report(CommandResult result, string action)
@@ -213,7 +220,14 @@ public sealed class HotkeyDispatcher : IDisposable
         }
     }
 
-    private void Notice(string message) => Noticed?.Invoke(new SessionNotice(SessionNoticeKind.Info, message));
+    private void Notice(string message)
+    {
+        if (!_disposed) Noticed?.Invoke(new SessionNotice(SessionNoticeKind.Info, message));
+    }
 
-    public void Dispose() => _service.Triggered -= OnTriggered;
+    public void Dispose()
+    {
+        _disposed = true;
+        _service.Triggered -= OnTriggered;
+    }
 }

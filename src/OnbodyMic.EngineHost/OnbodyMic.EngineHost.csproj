@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>OnbodyMic.EngineHost</RootNamespace>
+    <Version>0.2.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OnbodyMic.Application\OnbodyMic.Application.csproj" />
+    <ProjectReference Include="..\OnbodyMic.Media\OnbodyMic.Media.csproj" />
+    <ProjectReference Include="..\OnbodyMic.Platform.Windows\OnbodyMic.Platform.Windows.csproj" />
+  </ItemGroup>
+</Project>

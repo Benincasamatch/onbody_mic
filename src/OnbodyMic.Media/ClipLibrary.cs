@@ -178,7 +178,10 @@ public sealed class ClipLibrary : IDisposable
         }
     }
 
-    public string AssetAbsolutePath(ClipItem item) => Path.GetFullPath(Path.Combine(_root, item.ManagedAssetPath));
+    public string AssetAbsolutePath(ClipItem item) => ResolveManagedPath(item.ManagedAssetPath);
+
+    private string ResolveManagedPath(string relativePath) => Path.GetFullPath(Path.Combine(_root,
+        relativePath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)));
 
     /// <summary>Filter by name substring, optional favorites-only and group; sorted by name or import time (docs/01 §5.3).</summary>
     public IReadOnlyList<ClipItem> Search(string? query = null, ClipSortOrder sort = ClipSortOrder.Name, bool favoritesOnly = false, string? groupId = null)
@@ -275,7 +278,7 @@ public sealed class ClipLibrary : IDisposable
 
             var clipId = NewClipId(_items);
             var assetPath = $"assets/{clipId}{extension}";
-            var assetAbsolute = Path.Combine(_root, assetPath);
+            var assetAbsolute = ResolveManagedPath(assetPath);
             Directory.CreateDirectory(Path.Combine(_root, "assets"));
             CopyVerified(fullPath, assetAbsolute);
 

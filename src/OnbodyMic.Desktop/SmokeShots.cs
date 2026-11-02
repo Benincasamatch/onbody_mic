@@ -1,29 +1,23 @@
 namespace OnbodyMic.Desktop;
 
- using System.Drawing;
- using System.Runtime.InteropServices;
+using System.Drawing;
 using System.Windows.Forms;
 
 /// <summary>
-/// GUI smoke evidence (docs/09 verification): PrintWindow capture of the real
+/// GUI smoke evidence (docs/09 verification): WinForms bitmap rendering of the
 /// main window, top and sound-library half, when --selftest runs. Files go to
-/// build/shots/ next to the repo; missing directory is not an error (selftest
-/// must stay green on clean checkouts).
+/// the explicitly selected screenshot directory or the isolated selftest root.
 /// </summary>
 internal static class SmokeShots
 {
-    [DllImport("user32.dll")]
-    private static extern bool PrintWindow(IntPtr hwnd, IntPtr dc, uint flags);
-
+    public static string? OutputDirectory { get; set; }
     public static void Capture(Form form, string fileName)
     {
         try
         {
-            var dir = Path.Combine(FindRepoRoot(), "build", "shots");
-            if (!Directory.Exists(dir))
-            {
-                return;
-            }
+            var dir = OutputDirectory;
+            if (dir is null) return;
+            Directory.CreateDirectory(dir);
 
             // scroll viewport to the sound library first for the second shot
             if (fileName == "scrolled.png" && ScrollViewport(form) is { } content)
@@ -33,14 +27,14 @@ internal static class SmokeShots
                 Application.DoEvents();
             }
 
-            var bounds = form.ClientRectangle;
+            form.PerformLayout();
+            Application.DoEvents();
+            form.Refresh();
+            var bounds = new Rectangle(Point.Empty, form.Size);
             using var bmp = new Bitmap(bounds.Width, bounds.Height);
-            using var g = Graphics.FromImage(bmp);
-            var hdc = g.GetHdc();
-            _ = PrintWindow(form.Handle, hdc, 2); // PW_RENDERFULLCONTENT
-            g.ReleaseHdc(hdc);
+            form.DrawToBitmap(bmp, bounds);
             bmp.Save(Path.Combine(dir, fileName), System.Drawing.Imaging.ImageFormat.Png);
-            Console.WriteLine($"selftest: shot build/shots/{fileName}");
+            Console.WriteLine($"selftest: shot {Path.Combine(dir, fileName)}");
         }
         catch (Exception ex)
         {
@@ -53,14 +47,4 @@ internal static class SmokeShots
             .GetField("_content", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?
             .GetValue(form) as Panel;
 
-    private static string FindRepoRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "Directory.Build.props")))
-        {
-            dir = dir.Parent;
-        }
-
-        return dir?.FullName ?? AppContext.BaseDirectory;
-    }
 }

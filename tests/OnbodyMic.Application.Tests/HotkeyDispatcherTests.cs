@@ -84,12 +84,12 @@ public sealed class HotkeyDispatcherTests : IDisposable
     }
 
     [Fact]
-    public void Play_hotkey_with_extras_open_plays_the_clip_through_the_send_gate()
+    public async Task Play_hotkey_with_extras_open_plays_the_clip_through_the_send_gate()
     {
         Accept(_session.EnableExtras(true));
 
         _hotkeys.Fire(Play("clip-a"));
-
+        await _dispatcher.LastPlayback;
         var status = _session.Status();
         Assert.NotNull(status.Clip);
         Assert.Equal("clip-a", status.Clip!.ClipId);
@@ -98,12 +98,14 @@ public sealed class HotkeyDispatcherTests : IDisposable
     }
 
     [Fact]
-    public void Rapid_retrigger_replaces_the_running_clip_in_order()
+    public async Task Rapid_retrigger_replaces_the_running_clip_in_order()
     {
         Accept(_session.EnableExtras(true));
 
         _hotkeys.Fire(Play("clip-a"));
+        await _dispatcher.LastPlayback;
         _hotkeys.Fire(Play("clip-a"));
+        await _dispatcher.LastPlayback;
 
         Assert.Equal(1, _session.Metrics().Clip.ReplacedPlaybacks);
         Assert.NotNull(_session.Status().Clip);

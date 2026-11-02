@@ -80,10 +80,8 @@ internal sealed class TrayContext : ApplicationContext
         if (showFirstRun)
         {
             using var wizard = new FirstRunWizard(_shell);
-            if (wizard.ShowDialog(_main) == DialogResult.OK)
-            {
-                _main.ShowFromTray();
-            }
+            wizard.ShowDialog(_main);
+            _main.ShowFromTray();
         }
         else
         {

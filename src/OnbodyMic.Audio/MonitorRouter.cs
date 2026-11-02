@@ -46,6 +46,7 @@ public sealed class MonitorRouter
     }
 
     public ClipFeed Feed { get; }
+    public PeakAccumulator PreviewLevel { get; } = new();
 
     private ClipPlayer Player => Feed.Player;
 
@@ -98,6 +99,13 @@ public sealed class MonitorRouter
             // local audition replaces monitor content while the engine holds
             // automatic monitoring suspended
             emitted = ReadPlayer(destination);
+            var peak = 0f;
+            for (var i = 0; i < emitted; i++)
+            {
+                destination[i] *= gains.Clip;
+                peak = Math.Max(peak, Math.Abs(destination[i]));
+            }
+            PreviewLevel.Record(peak);
         }
         else if (state.Enabled && state.Mode == MonitorMode.ClipOnly)
         {
@@ -172,7 +180,7 @@ public sealed class MonitorRouter
         while (emitted < destination.Length)
         {
             var chunk = Math.Min(PlayerChunkFrames, destination.Length - emitted);
-            var taken = Player.Read(_playerScratch, chunk);
+            var taken = Player.Read(_playerScratch, chunk, ClipPlaybackMode.Preview);
             _playerScratch.AsSpan(0, taken).CopyTo(destination[emitted..]);
             emitted += taken;
             if (taken < chunk)

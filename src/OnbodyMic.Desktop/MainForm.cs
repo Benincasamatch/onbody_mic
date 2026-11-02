@@ -993,20 +993,20 @@ internal sealed class MainForm : Form
             _monitorVolume.Enabled = !status.EmergencyLatched;
 
             SyncSlider(_clipGain, _clipGainLabel, status.Gains.Clip);
-            _stopButton.Enabled = status.Clip is not null;
+            _stopButton.Enabled = status.Clip is not null || status.ClipLoading;
 
             // level meters (docs/09 §A3): one decay tick per poll keeps the bar moving
-            var metrics = _shell.Session.Metrics();
+            var levels = _shell.Session.TakeLevels();
             var micActive = status.Switches.MicSendEnabled && !status.EmergencyLatched && MicAvailable(status);
-            _micMeter.Sample(metrics.MixerPeak, micActive);
-            _micLevelText.Text = LevelText(metrics.MixerPeak, micActive);
+            _micMeter.Sample(levels.Mic, micActive);
+            _micLevelText.Text = LevelText(levels.Mic, micActive);
             var clipActive = status.Clip is not null && !status.EmergencyLatched;
-            _clipMeter.Sample(metrics.MixerPeak, clipActive);
-            _clipLevelText.Text = LevelText(metrics.MixerPeak, clipActive);
+            _clipMeter.Sample(levels.Clip, clipActive);
+            _clipLevelText.Text = LevelText(levels.Clip, clipActive);
 
             UpdateCards(status);
             UpdateClipPlayState(status);
-            UpdateStatusStrip(status);
+            UpdateStatusStrip(status, levels);
             Text = $"随声麦 — {ActivePresetName()}{(Dirty ? " *" : "")}";
         }
         finally
@@ -1047,7 +1047,9 @@ internal sealed class MainForm : Form
 
         _extrasCard.SetDescription(status.AppBinding is { } binding
             ? $"目标应用：{binding.Description}（pid {binding.ProcessId}）"
-            : "目标应用：未绑定（附加音频=音效）");
+            : status.Devices?.Application is { IsBound: true } saved
+                ? $"已保存：{Path.GetFileName(saved.ExecutablePath)}（请重新绑定运行中的程序）"
+                : "目标应用：未绑定（附加音频=音效）");
         _extrasCard.SetStatus(
             status.EmergencyLatched ? "锁存" :
             status.Switches.AppSendEnabled ? "应用捕获中" :
@@ -1067,15 +1069,16 @@ internal sealed class MainForm : Form
             status.MonitorSuspendedForPreview ? Theme.StatusWarn :
             status.Switches.MonitorEnabled ? Theme.StatusSending : Theme.StatusIdle);
 
-        _clipCard.SetDescription(status.Clip is { } clip
+        _clipCard.SetDescription(status.ClipLoading ? "音效加载中，可点击停止取消"
+            : status.Clip is { } clip
             ? $"{(clip.Mode == ClipPlaybackMode.Send ? "正在发送" : "本地试听")}：{ClipName(clip.ClipId)}"
             : "空闲（在音效库中选择并播放）");
         _clipCard.SetStatus(
-            status.Clip is null ? "空闲" : status.Clip.Mode == ClipPlaybackMode.Send ? "发送中" : "试听中",
+            status.ClipLoading ? "加载中" : status.Clip is null ? "空闲" : status.Clip.Mode == ClipPlaybackMode.Send ? "发送中" : "试听中",
             status.Clip is { Mode: ClipPlaybackMode.Send } ? Theme.StatusSending : Theme.StatusIdle);
     }
 
-    private void UpdateStatusStrip(SessionStatus status)
+    private void UpdateStatusStrip(SessionStatus status, SessionLevels levels)
     {
         var deviceText = status.Devices is null
             ? "设备：未配置"
@@ -1086,9 +1089,8 @@ internal sealed class MainForm : Form
 
         // Only the health verdict stays on the strip (docs/09 §A4); raw
         // clipping/underrun counters live in the diagnostics popup.
-        var metrics = _shell.Session.Metrics();
-        var fault = metrics.MixerClippedSamples > 0 || metrics.MixerPeak >= 0.99f;
-        _metricsLabel.Text = fault ? "电平异常" : "运行正常";
+        var fault = levels.Mix >= 0.99f;
+        _metricsLabel.Text = fault ? "发送电平偏高" : "发送电平正常";
         _metricsLabel.ForeColor = fault ? Theme.StatusFault : Theme.Success;
         _diagnoseButton.Text = fault ? "诊断 ●" : "诊断";
     }
@@ -1101,8 +1103,8 @@ internal sealed class MainForm : Form
         var lines = new StringBuilder()
             .AppendLine("音频引擎实时指标（docs/01 B08 取证口径）")
             .AppendLine()
-            .AppendLine($"峰值（MixerPeak）：{m.MixerPeak:0.000}")
-            .AppendLine($"削波样本（ClippedSamples）：{m.MixerClippedSamples}")
+            .AppendLine($"累计最高峰值（MixerPeak）：{m.MixerPeak:0.000}")
+            .AppendLine($"累计软限幅样本（ClippedSamples）：{m.MixerClippedSamples}")
             .AppendLine($"硬跳变（HardSteps）：{m.MixerHardSteps}")
             .AppendLine($"欠载帧（UnderrunFrames）：{m.MixerUnderrunFrames}")
             .AppendLine($"拒绝拉取（DeniedPulls）：{m.MixerDeniedPulls}")
@@ -1254,8 +1256,11 @@ internal sealed class MainForm : Form
             return;
         }
 
-        var result = _shell.Session.BindApplication(new AppBinding(instance.ProcessId, Path.GetFileName(instance.ExecutablePath)));
+        var name = Path.GetFileName(instance.ExecutablePath);
+        var result = _shell.Session.BindApplication(new AppBinding(instance.ProcessId, name),
+            new AppSelection(instance.ExecutablePath, name));
         Run(result, "绑定应用");
+        if (result.Accepted) MarkDirty();
     }
 
     private async Task PlaySelectedAsync(bool send)
@@ -1270,20 +1275,14 @@ internal sealed class MainForm : Form
         try
         {
             // decoding and the serialized session command run off the UI thread
-            var result = await Task.Run(() => send
-                ? _shell.Session.PlayClip(item.ClipId)
-                : _shell.Session.PreviewClip(item.ClipId));
+            var result = await (send
+                ? _shell.Session.PlayClipAsync(item.ClipId)
+                : _shell.Session.PreviewClipAsync(item.ClipId));
+            if (IsDisposed) return;
+            if (result.Rejection == "clip-start-cancelled") return;
             Run(result, what);
-            if (!result.Accepted)
-            {
-                return;
-            }
-
-            var status = _shell.Session.Status();
-            if (status.Clip is not { } clip || clip.ClipId != item.ClipId)
-            {
-                ShowMismatch(what, "播放未开始");
-            }
+            // A short clip may already have completed before this continuation.
+            // The command result is authoritative; an empty slot is not a failure.
         }
         finally
         {
@@ -1833,10 +1832,14 @@ internal sealed class MainForm : Form
         RefreshStatus();
     }
 
+    private int _busyOperations;
+
     private void SetBusy(bool busy)
     {
-        _importButton.Enabled = !busy;
-        UseWaitCursor = busy;
+        _busyOperations = Math.Max(0, _busyOperations + (busy ? 1 : -1));
+        if (IsDisposed) return;
+        _importButton.Enabled = _busyOperations == 0;
+        UseWaitCursor = _busyOperations > 0;
     }
 
     private ClipItem? SelectedClip() => _selectedRow?.Item;
@@ -1963,6 +1966,8 @@ internal sealed class MainForm : Form
     {
         "endpoint-missing" => "端点不存在（驱动可能未安装）",
         "endpoint-disabled" => "端点已被禁用（可在「设备设置…」启用）",
+        "endpoint-unplugged" => "设备未连接（请检查插头或连接）",
+        "endpoint-not-present" => "设备当前不在场（请重新连接或选择其他设备）",
         "executable-missing" => "应用路径不存在",
         "attach-failed" => "输出接入失败（可能被独占）",
         _ => reason,
@@ -1982,7 +1987,7 @@ internal sealed class MainForm : Form
 
         return DeviceCatalog.IsActive(endpoint)
             ? $"{prefix}：{endpoint.FriendlyName}"
-            : $"{prefix}：{endpoint.FriendlyName}（已禁用 — 在「设备设置…」中启用）";
+            : $"{prefix}：{endpoint.FriendlyName}（{DeviceCatalog.StateLabel(endpoint)}）";
     }
 
     private bool MicAvailable(SessionStatus status) =>
@@ -2007,21 +2012,26 @@ internal sealed class MainForm : Form
         {
             (headline, subline, lamp) = ("虚拟输出已失效", "发送全部关闭。处理：打开「设备设置…」确认端点后保存重新应用", Theme.StatusFault);
         }
-        else if (status.Switches.AnySendEnabled)
+        else if (status.Switches.MicSendEnabled || status.Switches.AppSendEnabled
+            || status.Clip is { Mode: ClipPlaybackMode.Send })
         {
-            (headline, subline, lamp) = ("正在对队友发声", "麦克风 / 附加音频 / 应用音频中至少一路已发送", Theme.StatusSending);
+            (headline, subline, lamp) = ("发送已开启", "已接通本程序到虚拟麦的音频路径；对方是否收到需在语音软件中确认", Theme.StatusSending);
         }
         else if (status.Clip is { Mode: ClipPlaybackMode.Preview })
         {
-            (headline, subline, lamp) = ("正在本地试听", "音效只在本地播放，队友听不到", Theme.StatusWarn);
+            (headline, subline, lamp) = ("正在本地试听", "该音效仅送往本地监听输出", Theme.StatusWarn);
         }
         else if (!status.DevicesValidated)
         {
             (headline, subline, lamp) = ("待配置", "设备未配置或校验未通过，配置完成前无法发声", Theme.StatusWarn);
         }
+        else if (status.Switches.ExtrasSendEnabled)
+        {
+            (headline, subline, lamp) = ("附加音频已就绪", "可播放音效或开启应用音频；当前没有附加音频播放", Theme.StatusIdle);
+        }
         else
         {
-            (headline, subline, lamp) = ("未对队友发声", "所有发送开关均已关闭，队友现在听不到你", Theme.StatusIdle);
+            (headline, subline, lamp) = ("本程序发送已关闭", "麦克风、音效和应用音频均未通过本程序发送", Theme.StatusIdle);
         }
 
         _statusLamp.BackColor = lamp;
@@ -2081,8 +2091,7 @@ internal sealed class MainForm : Form
         // audio. Report it explicitly instead of a generic "校验未通过".
         if (string.IsNullOrEmpty(status.Devices.VirtualCaptureDeviceId))
         {
-            return "虚拟麦 Capture 未配置：队友端（KOOK 等）将收不到任何声音。"
-                + "处理：打开「设备设置…」选择虚拟麦 Capture 端点；若显示「已禁用」，选中后点「启用选中端点」。";
+            return "实际虚拟麦监听未配置：可使用「仅音效」监听；如需检查线缆实际输出，请在「设备设置…」选择 Capture 端点。语音软件的输入仍需单独设置。";
         }
 
         if (_shell.Devices.Find(status.Devices.VirtualCaptureDeviceId) is not { } captureEndpoint)
@@ -2093,8 +2102,7 @@ internal sealed class MainForm : Form
 
         if (!DeviceCatalog.IsActive(captureEndpoint))
         {
-            return $"虚拟麦 Capture 已禁用（{captureEndpoint.FriendlyName}）：队友端收不到声音。"
-                + "处理：打开「设备设置…」，选中该端点后点「启用选中端点」。";
+            return $"虚拟麦 Capture 不可用（{captureEndpoint.FriendlyName}）：{DeviceCatalog.StateLabel(captureEndpoint)}。请在「设备设置…」处理后重新应用。";
         }
 
         if (!status.DevicesValidated)

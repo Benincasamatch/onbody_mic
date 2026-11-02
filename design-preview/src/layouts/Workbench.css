@@ -1,0 +1,409 @@
+.workbench {
+  --workbench-nav-width: 164px;
+  --workbench-inspector-width: 264px;
+}
+
+.workbench.workbench--sidebar-collapsed {
+  --workbench-nav-width: 60px;
+}
+
+.workbench.workbench--inspector-collapsed {
+  --workbench-inspector-width: 0px;
+}
+
+.workbench .workbench-body {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--workbench-nav-width) minmax(0, 1fr) var(--workbench-inspector-width);
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workbench .workbench-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 24px 12px 16px;
+  border-right: 1px solid var(--line);
+  background: rgba(17, 18, 23, .48);
+  overflow-y: auto;
+}
+
+.workbench .workbench-sidebar-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 20px;
+  margin: 0 10px 20px;
+}
+
+.workbench .workbench-sidebar-heading .section-label {
+  font-size: 11px;
+  letter-spacing: .08em;
+}
+
+.workbench .workbench-sidebar-mark {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.workbench .workbench-navigation {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.workbench .workbench-nav-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 42px;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--secondary);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.workbench .workbench-nav-item svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.workbench .workbench-nav-item:hover {
+  background: rgba(255, 255, 255, .035);
+  color: var(--text);
+}
+
+.workbench .workbench-nav-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.workbench .workbench-nav-item.is-selected {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.workbench .workbench-nav-item.is-selected svg {
+  color: var(--accent);
+}
+
+.workbench .workbench-nav-indicator {
+  width: 4px;
+  height: 4px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.workbench .workbench-sidebar-note {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: auto;
+  padding: 28px 10px 0;
+  color: var(--muted);
+}
+
+.workbench .workbench-sidebar-note > svg {
+  flex-shrink: 0;
+}
+
+.workbench .workbench-sidebar-note span,
+.workbench .workbench-sidebar-note small {
+  display: block;
+  font-size: 11px;
+  line-height: 1.9;
+}
+
+.workbench .workbench-sidebar-note small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.workbench.workbench--sidebar-collapsed .workbench-sidebar {
+  padding-right: 8px;
+  padding-left: 8px;
+}
+
+.workbench.workbench--sidebar-collapsed .workbench-sidebar-heading {
+  justify-content: center;
+  margin-right: 0;
+  margin-left: 0;
+}
+
+.workbench.workbench--sidebar-collapsed .workbench-sidebar-heading .section-label,
+.workbench.workbench--sidebar-collapsed .workbench-nav-label,
+.workbench.workbench--sidebar-collapsed .workbench-nav-indicator,
+.workbench.workbench--sidebar-collapsed .workbench-sidebar-note > div {
+  display: none;
+}
+
+.workbench.workbench--sidebar-collapsed .workbench-nav-item {
+  justify-content: center;
+  padding-right: 0;
+  padding-left: 0;
+}
+
+.workbench.workbench--sidebar-collapsed .workbench-sidebar-note {
+  justify-content: center;
+  padding-right: 0;
+  padding-left: 0;
+}
+
+.workbench .workbench-main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  min-height: 0;
+  padding: 24px 28px 16px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.workbench .workbench-main > .page-heading {
+  flex-shrink: 0;
+  margin: 0;
+}
+
+.workbench .workbench-routing {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.workbench .workbench-routing .route-card {
+  min-width: 0;
+  margin: 0;
+}
+
+.workbench .workbench-routing .route-card.compact {
+  padding: 12px 16px;
+}
+
+.workbench .workbench-library {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 8px;
+  min-width: 0;
+  min-height: 240px;
+}
+
+.workbench .workbench-library-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  gap: 12px;
+}
+
+.workbench .workbench-library-title {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.workbench .workbench-library-title h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.workbench .workbench-library-title > span {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.workbench .workbench-library-heading .button {
+  min-height: 30px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.workbench .workbench-library > .library-toolbar {
+  flex-shrink: 0;
+}
+
+.workbench .workbench-library-list {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 100px;
+  min-width: 0;
+  overflow: hidden;
+  border-top: 1px solid var(--line);
+}
+
+.workbench .workbench-library-list > .clip-table-wrap {
+  flex: 1;
+  min-height: 0;
+  overscroll-behavior: contain;
+}
+
+.workbench .workbench-main > .playback-strip {
+  flex-shrink: 0;
+  margin: 0;
+}
+
+.workbench .workbench-utility-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.workbench .workbench-utility-content > .utility-pane {
+  margin: 0;
+}
+
+.workbench .workbench-inspector-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--line);
+  background: rgba(23, 25, 30, .42);
+}
+
+.workbench .workbench-inspector-pane[hidden] {
+  display: none;
+}
+
+.workbench .workbench-inspector-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  gap: 8px;
+  padding: 16px 16px 12px 20px;
+}
+
+.workbench .workbench-inspector-heading > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.workbench .workbench-inspector-heading > .icon-button {
+  color: var(--muted);
+}
+
+.workbench .workbench-inspector-content {
+  flex: 1;
+  min-height: 0;
+  padding: 4px 20px 20px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.workbench .workbench-inspector-content > .inspector {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.workbench .workbench-properties-dialog {
+  display: none;
+}
+
+@media (max-width: 1180px) {
+  .workbench {
+    --workbench-nav-width: 148px;
+    --workbench-inspector-width: 0px;
+  }
+
+  .workbench .workbench-inspector-pane,
+  .workbench .workbench-inspector-toggle {
+    display: none;
+  }
+
+  .workbench .workbench-properties-dialog {
+    display: inline-flex;
+  }
+
+  .workbench .workbench-main {
+    gap: 16px;
+    padding: 20px 24px 16px;
+  }
+}
+
+@media (max-height: 800px) and (min-width: 641px) {
+  .workbench .workbench-main {
+    gap: 14px;
+    padding-top: 18px;
+  }
+
+  .workbench .workbench-routing {
+    gap: 10px;
+  }
+
+  .workbench .workbench-routing .route-card.compact {
+    padding: 12px 14px;
+  }
+
+  .workbench .workbench-library {
+    gap: 8px;
+    min-height: 240px;
+  }
+}
+
+@media (max-width: 640px) {
+  .workbench {
+    --workbench-nav-width: 60px;
+  }
+
+  .workbench .workbench-main {
+    grid-column: 2;
+    gap: 16px;
+    padding: 20px 16px 16px;
+  }
+
+  .workbench:not(.workbench--sidebar-collapsed) .workbench-sidebar {
+    position: absolute;
+    z-index: 5;
+    inset: 0 auto 0 0;
+    width: 164px;
+    background: var(--surface-raised);
+    box-shadow: 12px 0 28px rgba(0, 0, 0, .15);
+  }
+
+  .workbench .workbench-routing {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workbench .workbench-library {
+    min-height: 300px;
+  }
+
+  .workbench .workbench-library-heading {
+    gap: 6px;
+  }
+
+  .workbench .workbench-library-title {
+    gap: 4px 8px;
+  }
+
+  .workbench .workbench-library-heading .button {
+    flex-shrink: 0;
+  }
+}

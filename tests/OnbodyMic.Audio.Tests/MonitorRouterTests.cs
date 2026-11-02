@@ -22,6 +22,7 @@ public sealed class MonitorRouterTests
         var (router, _, feed) = Build(new MonitorRouteState(true, MonitorMode.ClipOnly), RouteGains.Unity, player);
 
         var mixed = new float[2];
+        feed.SetTicket(new SourceTicket("clip", AudioKind.Clip, 0, 1));
         Assert.Equal(2, feed.Pull(mixed, 2)); // the mixer's authorized pull fills the tap
 
         var output = new float[2];

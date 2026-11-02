@@ -171,9 +171,9 @@ internal sealed class DeviceSettingsForm : Form
         card.SetColumnSpan(control, 2);
     }
 
-    private async Task LoadDevicesAsync()
+    private async Task LoadDevicesAsync(bool allowBusy = false)
     {
-        if (_busy)
+        if (IsDisposed || (_busy && !allowBusy))
         {
             return;
         }
@@ -185,19 +185,26 @@ internal sealed class DeviceSettingsForm : Form
         try
         {
             var current = _shell.Session.Status().Devices;
+            string? SelectedId(ComboBox combo, string? fallback) => combo.Items.Count == 0
+                ? fallback : (combo.SelectedItem as EndpointRow)?.Endpoint.Id;
+            var micId = SelectedId(_micCombo, current?.MicDeviceId);
+            var renderId = SelectedId(_renderCombo, current?.VirtualRenderDeviceId);
+            var cableId = SelectedId(_cableCombo, current?.VirtualCaptureDeviceId);
+            var monitorId = SelectedId(_monitorCombo, current?.MonitorDeviceId);
 
             // include disabled endpoints: on a clean machine the virtual capture
             // endpoint is disabled and must still be selectable (and enableable)
             var devices = await Task.Run(() => WindowsAudioDevices.List(activeOnly: false));
+            if (IsDisposed) return;
             _devices = devices;
-            Fill(_micCombo, capture: true, current?.MicDeviceId, allowEmpty: false);
-            Fill(_renderCombo, capture: false, current?.VirtualRenderDeviceId, allowEmpty: false);
-            Fill(_cableCombo, capture: true, current?.VirtualCaptureDeviceId, allowEmpty: true);
-            Fill(_monitorCombo, capture: false, current?.MonitorDeviceId, allowEmpty: false);
+            Fill(_micCombo, capture: true, micId, allowEmpty: false);
+            Fill(_renderCombo, capture: false, renderId, allowEmpty: false);
+            Fill(_cableCombo, capture: true, cableId, allowEmpty: true);
+            Fill(_monitorCombo, capture: false, monitorId, allowEmpty: false);
 
             var missing = new[] { current?.MicDeviceId, current?.VirtualRenderDeviceId, current?.MonitorDeviceId }
                 .Count(id => id is not null && devices.All(d => d.Id != id));
-            var disabled = devices.Count(d => d.State != "Active" && d.State != "NotPresent");
+            var disabled = devices.Count(d => d.State == "Disabled");
             var active = devices.Count(d => d.State == "Active");
             var text = devices.Count == 0
                 ? "未检测到任何音频端点：确认声卡/线缆驱动正常后点「刷新设备」。"
@@ -205,7 +212,7 @@ internal sealed class DeviceSettingsForm : Form
                     ? $"已发现 {devices.Count} 个端点（{active} 个可用），但预设中有 {missing} 个端点已不存在。"
                     : disabled > 0
                         ? $"已发现 {devices.Count} 个端点，其中 {disabled} 个被禁用（标为「已禁用」，选中后点「启用选中端点」）。"
-                        : $"已发现 {devices.Count} 个端点，全部可用。";
+                        : $"已发现 {devices.Count} 个端点，{active} 个可用；其他端点请查看各自状态。";
             SetStatus(text, missing > 0 || disabled > 0 ? Theme.Warning : Theme.TextSecondary);
         }
         catch (Exception ex)
@@ -215,8 +222,11 @@ internal sealed class DeviceSettingsForm : Form
         finally
         {
             _busy = false;
-            _refreshButton.Enabled = true;
-            _saveButton.Enabled = true;
+            if (!IsDisposed)
+            {
+                _refreshButton.Enabled = true;
+                _saveButton.Enabled = true;
+            }
         }
     }
 
@@ -227,19 +237,18 @@ internal sealed class DeviceSettingsForm : Form
     /// </summary>
     private async Task EnableSelectedAsync()
     {
-        // Enable every disabled endpoint the dialog currently knows about. The
-        // button used to require a selection in a combo box, so a user who only
-        // opened the dialog got a status line and nothing happened — the virtual
-        // microphone stayed dead.
-        var targets = _devices
-            .Where(d => d.State != "Active" && d.State != "NotPresent")
+        // The button acts only on the user's selected endpoints. Unplugged
+        // hardware cannot be repaired by toggling its enabled flag.
+        var targets = new[] { _micCombo, _renderCombo, _cableCombo, _monitorCombo }
+            .Select(c => c.SelectedItem).OfType<EndpointRow>()
+            .Where(row => row.Disabled).Select(row => row.Endpoint)
             .GroupBy(d => d.Id)
             .Select(g => g.First())
             .ToList();
 
         if (targets.Count == 0)
         {
-            SetStatus("没有需要启用的端点（列表中的端点都可用）。", Theme.TextSecondary);
+            SetStatus("当前选项中没有已禁用的端点。请先选择标为「已禁用」的设备；未连接的设备需要重新连接。", Theme.TextSecondary);
             return;
         }
 
@@ -271,6 +280,7 @@ internal sealed class DeviceSettingsForm : Form
                         return false;
                     }
                 });
+                if (IsDisposed) return;
 
                 if (ok)
                 {
@@ -282,7 +292,14 @@ internal sealed class DeviceSettingsForm : Form
                 }
             }
 
-            await LoadDevicesAsync();
+            await LoadDevicesAsync(allowBusy: true);
+            if (IsDisposed) return;
+            foreach (var target in targets.Where(t => enabled.Contains(t.FriendlyName)
+                && !_devices.Any(d => d.Id == t.Id && d.State == "Active")))
+            {
+                enabled.Remove(target.FriendlyName);
+                failed.Add(target.FriendlyName);
+            }
             _shell.Devices.RefreshAsync();
 
             var text = enabled.Count > 0
@@ -298,8 +315,11 @@ internal sealed class DeviceSettingsForm : Form
         finally
         {
             _busy = false;
-            _enableButton.Enabled = true;
-            _saveButton.Enabled = true;
+            if (!IsDisposed)
+            {
+                _enableButton.Enabled = true;
+                _saveButton.Enabled = true;
+            }
         }
     }
 
@@ -408,19 +428,19 @@ internal sealed class DeviceSettingsForm : Form
 
     private void SetStatus(string text, Color color)
     {
+        if (IsDisposed) return;
         _status.Text = text;
         _status.ForeColor = color;
     }
 
     private sealed record EndpointRow(AudioEndpointInfo Endpoint, bool Missing)
     {
-        /// <summary>True when Windows reports the endpoint disabled/unplugged: selectable, but not usable until enabled.</summary>
-        public bool Disabled => !Missing && Endpoint.State != "Active";
+        public bool Disabled => !Missing && Endpoint.State == "Disabled";
 
         public override string ToString() => Missing
             ? $"{Endpoint.FriendlyName}（未检测到）"
-            : Disabled
-                ? $"{Endpoint.FriendlyName}（已禁用 — 选中后点「启用选中端点」）"
+            : Endpoint.State != "Active"
+                ? $"{Endpoint.FriendlyName}（{DeviceCatalog.StateLabel(Endpoint)}）"
                 : Endpoint.FriendlyName;
     }
 }
