@@ -1,5 +1,6 @@
 namespace OnbodyMic.Media.Tests;
 
+using System.Text.Json.Nodes;
 using OnbodyMic.Audio;
 using OnbodyMic.Media;
 using Xunit;
@@ -42,6 +43,28 @@ public sealed class ClipLibraryTests : IDisposable
         var path = Path.GetFullPath(Path.Combine(_dir, name));
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, contents);
+        return path;
+    }
+
+    private string ExportedWav(string name, short sample = 1638)
+    {
+        var path = Path.GetFullPath(Path.Combine(_dir, name));
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using var writer = new BinaryWriter(File.Create(path));
+        const int samples = 4410;
+        writer.Write("RIFF"u8);
+        writer.Write(36 + samples * sizeof(short));
+        writer.Write("WAVEfmt "u8);
+        writer.Write(16);
+        writer.Write((short)1);
+        writer.Write((short)1);
+        writer.Write(44100);
+        writer.Write(44100 * sizeof(short));
+        writer.Write((short)sizeof(short));
+        writer.Write((short)16);
+        writer.Write("data"u8);
+        writer.Write(samples * sizeof(short));
+        for (var i = 0; i < samples; i++) writer.Write(sample);
         return path;
     }
 
@@ -467,6 +490,8 @@ public sealed class ClipLibraryTests : IDisposable
         var folder = Path.Combine(_dir, "new-root");
         Directory.CreateDirectory(folder);
         var newSource = SourceFile("third.wav");
+        var selection = ExportedWav("selection.wav");
+        var origin = new ClipOrigin("trim", first.ClipId, first.OriginalImportPath!, 0, 100);
         var changes = 0;
         library.Changed += () => changes++;
 
@@ -476,7 +501,9 @@ public sealed class ClipLibraryTests : IDisposable
             () => library.CreateGroup("new-child", root.GroupId),
             () => library.RenameGroup(root.GroupId, "renamed"),
             () => library.DeleteGroup(root.GroupId),
+            () => library.DeleteGroupAndClips(root.GroupId),
             () => library.Import(newSource, groupId: child.GroupId),
+            () => library.ImportSelection(selection, origin, "selection", groupId: child.GroupId),
             () => library.Delete(first.ClipId),
         ];
         foreach (var mutate in mutations)
@@ -487,8 +514,11 @@ public sealed class ClipLibraryTests : IDisposable
             Assert.Equal(originalItems, library.Search(sort: ClipSortOrder.LibraryOrder));
             Assert.Equal(originalIndex, File.ReadAllText(index));
             Assert.Equal(originalAssets.Order(), Directory.GetFiles(Path.Combine(library.Root, "assets")).Order());
+            Assert.Empty(Directory.GetDirectories(library.Root, ".delete-*"));
             Assert.Equal(0, changes);
         }
+        Assert.True(File.Exists(selection));
+        Assert.True(File.Exists(first.OriginalImportPath));
         Assert.Throws<ClipImportException>(() => library.Import(newSource, groupId: "group-missing"));
         Directory.Delete(index + ".tmp");
         using var reopened = OpenLib();
@@ -535,6 +565,522 @@ public sealed class ClipLibraryTests : IDisposable
 
         var order = library.PrefillCandidates().Select(i => i.ClipId).ToArray();
         Assert.Equal([c.ClipId, b.ClipId, a.ClipId], order);
+    }
+
+    [Fact]
+    public void Trimmed_selection_reopens_with_origin_and_never_persists_the_temporary_export_path()
+    {
+        using var library = OpenLib();
+        var source = SourceFile("original.mp3");
+        var sourceBytes = File.ReadAllBytes(source);
+        _decoder.Generator = _ => new float[44100];
+        var parent = library.Import(source).Item;
+        _decoder.Generator = _ => new float[4410];
+        var group = library.CreateGroup("Crops")!;
+        var export = ExportedWav("temporary/exported-selection.wav");
+        var exportedBytes = File.ReadAllBytes(export);
+        var origin = new ClipOrigin("trim", parent.ClipId, source, 250, 350);
+        ClipItem? notifiedItem = null;
+        library.Changed += () =>
+        {
+            var item = library.ItemsSnapshot().Last();
+            notifiedItem = item;
+            Assert.Equal(exportedBytes, File.ReadAllBytes(library.AssetAbsolutePath(item)));
+        };
+
+        var result = library.ImportSelection(export, origin, "  Selected sound  ", groupId: group.GroupId);
+        Assert.Equal(ImportOutcome.Imported, result.Outcome);
+        Assert.Equal(result.Item, notifiedItem);
+        Assert.Equal("Selected sound", result.Item.DisplayName);
+        Assert.Equal(origin, result.Item.Origin);
+        Assert.Equal(source, result.Item.OriginalImportPath);
+        Assert.Equal("wav", result.Item.Format);
+        Assert.Equal(100, result.Item.DurationMs);
+        Assert.True(library.SetFavorite(result.Item.ClipId, true));
+        Assert.True(library.SetGain(result.Item.ClipId, 0.75f));
+        var persistedItem = library.Find(result.Item.ClipId)!;
+        var index = File.ReadAllText(Path.Combine(library.Root, "index.json"));
+        Assert.Equal(2, JsonNode.Parse(index)!["schemaVersion"]!.GetValue<int>());
+        Assert.DoesNotContain(Path.GetFileName(export), index);
+        Assert.Equal(exportedBytes, File.ReadAllBytes(library.AssetAbsolutePath(persistedItem)));
+        Assert.Equal(sourceBytes, File.ReadAllBytes(source));
+        File.Delete(export);
+
+        using var reopened = OpenLib();
+        Assert.Equal(persistedItem, reopened.Find(persistedItem.ClipId));
+        Assert.Null(reopened.Find(parent.ClipId)!.Origin);
+        Assert.True(reopened.IsAvailable(persistedItem.ClipId));
+        Assert.Equal(exportedBytes, File.ReadAllBytes(reopened.AssetAbsolutePath(persistedItem)));
+    }
+
+    [Fact]
+    public void Legacy_schema_one_keeps_metadata_and_order_then_migrates_only_after_a_successful_mutation()
+    {
+        using var library = OpenLib();
+        var group = library.CreateGroup("Legacy")!;
+        var first = library.Import(SourceFile("legacy-first.wav"), groupId: group.GroupId).Item;
+        var second = library.Import(SourceFile("legacy-second.mp3")).Item;
+        library.SetFavorite(first.ClipId, true);
+        library.SetGain(first.ClipId, 0.5f);
+        var before = library.ItemsSnapshot();
+        var groups = library.GroupsSnapshot();
+        var indexPath = Path.Combine(library.Root, "index.json");
+        var document = JsonNode.Parse(File.ReadAllText(indexPath))!.AsObject();
+        document["schemaVersion"] = 1;
+        var legacyJson = document.ToJsonString();
+        File.WriteAllText(indexPath, legacyJson);
+
+        using var legacy = OpenLib();
+        Assert.Equal(before, legacy.ItemsSnapshot());
+        Assert.Equal(groups, legacy.GroupsSnapshot());
+        Assert.All(legacy.ItemsSnapshot(), item => Assert.Null(item.Origin));
+        Assert.Equal(legacyJson, File.ReadAllText(indexPath));
+        Directory.CreateDirectory(indexPath + ".tmp");
+        var failure = Record.Exception(() => legacy.Rename(second.ClipId, "Migrated"));
+        Assert.True(failure is IOException or UnauthorizedAccessException, failure?.ToString());
+        Assert.Equal(before, legacy.ItemsSnapshot());
+        Assert.Equal(legacyJson, File.ReadAllText(indexPath));
+        Directory.Delete(indexPath + ".tmp");
+
+        Assert.True(legacy.Rename(second.ClipId, "Migrated"));
+        Assert.Equal(2, JsonNode.Parse(File.ReadAllText(indexPath))!["schemaVersion"]!.GetValue<int>());
+        using var reopened = OpenLib();
+        Assert.Equal(legacy.ItemsSnapshot(), reopened.ItemsSnapshot());
+        Assert.Equal(groups, reopened.GroupsSnapshot());
+        Assert.Equal(new[] { first.ClipId, second.ClipId }, reopened.ItemsSnapshot().Select(item => item.ClipId));
+        Assert.True(reopened.Find(first.ClipId)!.Favorite);
+        Assert.Equal(0.5f, reopened.Find(first.ClipId)!.Gain);
+        Assert.All(reopened.ItemsSnapshot(), item => Assert.Null(item.Origin));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    [InlineData(99)]
+    public void Unknown_index_schemas_are_refused_without_overwriting(int version)
+    {
+        var json = "{\"schemaVersion\":" + version + ",\"items\":[],\"groups\":[]}";
+        var index = Write("lib/index.json", json);
+        Assert.Throws<ClipLibraryLoadException>(() => OpenLib());
+        Assert.Equal(json, File.ReadAllText(index));
+    }
+
+    [Theory]
+    [InlineData("kind")]
+    [InlineData("relativePath")]
+    [InlineData("emptyPath")]
+    [InlineData("emptyParent")]
+    [InlineData("selfParent")]
+    [InlineData("negativeStart")]
+    [InlineData("emptyRange")]
+    [InlineData("tooLong")]
+    [InlineData("format")]
+    [InlineData("temporaryOriginalImportPath")]
+    [InlineData("schemaOneOrigin")]
+    public void Invalid_persisted_origins_refuse_to_load_without_overwriting(string invalidField)
+    {
+        using var library = OpenLib();
+        var source = SourceFile("origin-source.mp3");
+        var export = ExportedWav("origin-export.wav");
+        var item = library.ImportSelection(export, new ClipOrigin("trim", null, source, 0, 100), "Crop").Item;
+        var indexPath = Path.Combine(library.Root, "index.json");
+        var document = JsonNode.Parse(File.ReadAllText(indexPath))!.AsObject();
+        var dto = document["items"]![0]!.AsObject();
+        var origin = dto["origin"]!.AsObject();
+        switch (invalidField)
+        {
+            case "kind": origin["kind"] = "copy"; break;
+            case "relativePath": origin["originalPath"] = "relative.wav"; break;
+            case "emptyPath": origin["originalPath"] = " "; break;
+            case "emptyParent": origin["parentClipId"] = " "; break;
+            case "selfParent": origin["parentClipId"] = item.ClipId; break;
+            case "negativeStart": origin["startMs"] = -1; break;
+            case "emptyRange": origin["endMs"] = 0; break;
+            case "tooLong": origin["endMs"] = 60001; break;
+            case "format": dto["format"] = "mp3"; break;
+            case "temporaryOriginalImportPath": dto["originalImportPath"] = export; break;
+            case "schemaOneOrigin": document["schemaVersion"] = 1; break;
+            default: throw new InvalidOperationException(invalidField);
+        }
+        var json = document.ToJsonString();
+        File.WriteAllText(indexPath, json);
+
+        Assert.Throws<ClipLibraryLoadException>(() => OpenLib());
+        Assert.Equal(json, File.ReadAllText(indexPath));
+        Assert.True(File.Exists(library.AssetAbsolutePath(item)));
+    }
+
+    [Theory]
+    [InlineData("copy", null, 0, 100, false)]
+    [InlineData("trim", " ", 0, 100, false)]
+    [InlineData("trim", null, -1, 100, false)]
+    [InlineData("trim", null, 100, 100, false)]
+    [InlineData("trim", null, 100, 0, false)]
+    [InlineData("trim", null, 0, 60001, false)]
+    [InlineData("trim", null, 0, int.MaxValue, false)]
+    [InlineData("trim", null, 0, 100, true)]
+    public void Invalid_selection_origins_are_rejected_before_copying_or_decoding(string kind, string? parentId, int startMs, int endMs, bool relativePath)
+    {
+        using var library = OpenLib();
+        var export = ExportedWav("invalid-origin-export.wav");
+        var originalPath = relativePath ? "relative.wav" : Path.Combine(_dir, "original.mp3");
+        var origin = new ClipOrigin(kind, parentId, originalPath, startMs, endMs);
+
+        Assert.Throws<ClipImportException>(() => library.ImportSelection(export, origin, "Crop"));
+        Assert.Equal(0, _decoder.Calls);
+        Assert.Empty(library.ItemsSnapshot());
+        Assert.Empty(Directory.GetFiles(Path.Combine(library.Root, "assets")));
+        Assert.False(File.Exists(Path.Combine(library.Root, "index.json")));
+        Assert.True(File.Exists(export));
+    }
+
+    [Fact]
+    public void Selection_import_requires_wav_and_a_name_and_applies_final_size_and_duration_limits()
+    {
+        var export = ExportedWav("bounded-export.wav");
+        var source = SourceFile("bounded-source.mp3");
+        var origin = new ClipOrigin("trim", null, source, 0, 100);
+        using var library = OpenLib();
+        Assert.Throws<ClipImportException>(() => library.ImportSelection(source, origin, "Crop"));
+        Assert.Throws<ClipImportException>(() => library.ImportSelection(export, origin, " "));
+        Assert.Throws<ClipImportException>(() => library.ImportSelection(export, null!, "Crop"));
+        Assert.Empty(library.ItemsSnapshot());
+        Assert.Empty(Directory.GetFiles(Path.Combine(library.Root, "assets")));
+
+        using var sizeLimited = OpenLib(new ClipLibraryLimits(8, 60));
+        Assert.Throws<ClipImportException>(() => sizeLimited.ImportSelection(export, origin, "Crop"));
+        Assert.Equal(0, _decoder.Calls);
+        _decoder.Generator = _ => new float[44100 * 2];
+        using var durationLimited = OpenLib(new ClipLibraryLimits(32 * 1024 * 1024, 1));
+        Assert.Throws<ClipImportException>(() => durationLimited.ImportSelection(export, origin, "Crop"));
+        Assert.Empty(durationLimited.ItemsSnapshot());
+        Assert.Empty(Directory.GetFiles(Path.Combine(durationLimited.Root, "assets")));
+        Assert.True(File.Exists(export));
+    }
+
+    [Fact]
+    public void Duplicate_crops_preserve_the_existing_origin_and_forced_copies_link_the_requested_parent()
+    {
+        using var library = OpenLib();
+        var sourceA = SourceFile("parent-a.mp3");
+        var sourceB = SourceFile("parent-b.mp3");
+        var parentA = library.Import(sourceA).Item;
+        var parentB = library.Import(sourceB).Item;
+        var groupA = library.CreateGroup("Existing")!;
+        var groupB = library.CreateGroup("Requested")!;
+        var exportA = ExportedWav("export-a.wav");
+        var exportB = ExportedWav("export-b.wav");
+        var originA = new ClipOrigin("trim", parentA.ClipId, sourceA, 0, 100);
+        var originB = new ClipOrigin("trim", parentB.ClipId, sourceB, 0, 100);
+        var first = library.ImportSelection(exportA, originA, "First", groupId: groupA.GroupId).Item;
+        library.SetFavorite(first.ClipId, true);
+        library.SetGain(first.ClipId, 0.5f);
+        library.Rename(first.ClipId, "Keep this crop");
+        first = library.Find(first.ClipId)!;
+        var indexPath = Path.Combine(library.Root, "index.json");
+        var before = File.ReadAllText(indexPath);
+        var changes = 0;
+        library.Changed += () => changes++;
+
+        var duplicate = library.ImportSelection(exportB, originB, "Second", groupId: groupB.GroupId);
+        Assert.Equal(ImportOutcome.Duplicate, duplicate.Outcome);
+        Assert.Equal(first, duplicate.Item);
+        Assert.Equal(first, duplicate.ExistingDuplicate);
+        Assert.Equal(before, File.ReadAllText(indexPath));
+        Assert.Equal(0, changes);
+        var forced = library.ImportSelection(exportB, originB, "Second", allowDuplicate: true, groupId: groupB.GroupId);
+        Assert.Equal(ImportOutcome.Imported, forced.Outcome);
+        Assert.NotEqual(first.ClipId, forced.Item.ClipId);
+        Assert.NotEqual(first.ManagedAssetPath, forced.Item.ManagedAssetPath);
+        Assert.Equal(originB, forced.Item.Origin);
+        Assert.Equal(groupB.GroupId, forced.Item.GroupId);
+        Assert.Equal(first, library.Find(first.ClipId));
+        Assert.Equal(1, changes);
+        Assert.Equal(4, Directory.GetFiles(Path.Combine(library.Root, "assets")).Length);
+
+        using var reopened = OpenLib();
+        Assert.Equal(first, reopened.Find(first.ClipId));
+        Assert.Equal(forced.Item, reopened.Find(forced.Item.ClipId));
+        Assert.Equal(new[] { parentA.ClipId, parentB.ClipId, first.ClipId, forced.Item.ClipId }, reopened.ItemsSnapshot().Select(item => item.ClipId));
+    }
+
+    [Fact]
+    public void Full_selection_duplicate_preserves_normal_parent_metadata_until_explicitly_forced()
+    {
+        using var library = OpenLib();
+        var source = ExportedWav("normal-parent.wav");
+        var export = ExportedWav("full-selection.wav");
+        var parent = library.Import(source, displayName: "Original").Item;
+        library.SetFavorite(parent.ClipId, true);
+        library.SetGain(parent.ClipId, 0.25f);
+        parent = library.Find(parent.ClipId)!;
+        var group = library.CreateGroup("New copies")!;
+        var origin = new ClipOrigin("trim", parent.ClipId, source, 0, 100);
+
+        var duplicate = library.ImportSelection(export, origin, "Crop", groupId: group.GroupId);
+        Assert.Equal(ImportOutcome.Duplicate, duplicate.Outcome);
+        Assert.Equal(parent, duplicate.Item);
+        Assert.Null(duplicate.Item.Origin);
+        Assert.Single(library.ItemsSnapshot());
+        var forced = library.ImportSelection(export, origin, "Crop", allowDuplicate: true, groupId: group.GroupId).Item;
+        Assert.Equal(origin, forced.Origin);
+        Assert.Equal(group.GroupId, forced.GroupId);
+        Assert.False(forced.Favorite);
+        Assert.Equal(1f, forced.Gain);
+        Assert.Equal(parent, library.Find(parent.ClipId));
+        Assert.True(library.Delete(parent.ClipId));
+        Assert.True(library.IsAvailable(forced.ClipId));
+        Assert.True(File.Exists(source));
+        using var reopened = OpenLib();
+        Assert.Equal(forced, reopened.Find(forced.ClipId));
+    }
+
+    [Fact]
+    public void Deleting_parent_never_damages_an_independent_crop_or_its_dangling_provenance()
+    {
+        using var library = OpenLib();
+        var source = ExportedWav("deletable-parent.wav");
+        var originalBytes = File.ReadAllBytes(source);
+        var export = ExportedWav("independent-crop.wav", sample: 500);
+        var croppedBytes = File.ReadAllBytes(export);
+        var parent = library.Import(source).Item;
+        var origin = new ClipOrigin("trim", parent.ClipId, source, 0, 100);
+        var crop = library.ImportSelection(export, origin, "Independent crop").Item;
+        File.Delete(export);
+
+        Assert.True(library.Delete(parent.ClipId));
+        Assert.False(File.Exists(library.AssetAbsolutePath(parent)));
+        Assert.Equal(originalBytes, File.ReadAllBytes(source));
+        Assert.Equal(croppedBytes, File.ReadAllBytes(library.AssetAbsolutePath(crop)));
+        Assert.True(library.IsAvailable(crop.ClipId));
+        File.Delete(source);
+
+        using var reopened = OpenLib();
+        Assert.Null(reopened.Find(parent.ClipId));
+        Assert.Equal(crop, reopened.Find(crop.ClipId));
+        Assert.Equal(origin, reopened.Find(crop.ClipId)!.Origin);
+        Assert.True(reopened.IsAvailable(crop.ClipId));
+        Assert.Equal(croppedBytes, File.ReadAllBytes(reopened.AssetAbsolutePath(crop)));
+    }
+
+    [Fact]
+    public void Subtree_delete_removes_only_contained_copies_and_preserves_outside_order_metadata_and_crops()
+    {
+        using var library = OpenLib();
+        var outsideBefore = library.CreateGroup("Before")!;
+        var root = library.CreateGroup("Delete")!;
+        var child = library.CreateGroup("Child", root.GroupId)!;
+        var grandchild = library.CreateGroup("Grandchild", child.GroupId)!;
+        var outsideAfter = library.CreateGroup("After")!;
+        var outsideA = library.Import(SourceFile("outside-a.wav"), groupId: outsideBefore.GroupId).Item;
+        var rootClip = library.Import(SourceFile("root-clip.mp3"), groupId: root.GroupId).Item;
+        var export = ExportedWav("outside-derived.wav");
+        var cropOrigin = new ClipOrigin("trim", rootClip.ClipId, rootClip.OriginalImportPath!, 0, 100);
+        var outsideCrop = library.ImportSelection(export, cropOrigin, "Outside crop", groupId: outsideBefore.GroupId).Item;
+        var childClip = library.Import(SourceFile("child-clip.wav"), groupId: child.GroupId).Item;
+        var outsideB = library.Import(SourceFile("outside-b.wav"), groupId: outsideAfter.GroupId).Item;
+        var grandchildClip = library.Import(SourceFile("grandchild-clip.wav"), groupId: grandchild.GroupId).Item;
+        library.SetFavorite(outsideA.ClipId, true);
+        library.SetGain(outsideB.ClipId, 0.5f);
+        var removed = new[] { rootClip, childClip, grandchildClip };
+        var retained = library.ItemsSnapshot().Where(item => !removed.Any(deleted => deleted.ClipId == item.ClipId)).ToArray();
+        var retainedGroups = library.GroupsSnapshot().Where(group => group.GroupId != root.GroupId && group.GroupId != child.GroupId && group.GroupId != grandchild.GroupId).ToArray();
+        var originalFiles = library.ItemsSnapshot().Select(item => item.OriginalImportPath!).Distinct().ToDictionary(path => path, File.ReadAllBytes);
+        var changes = 0;
+        library.Changed += () => changes++;
+
+        Assert.Equal(removed.Select(item => item.ClipId), library.DeleteGroupAndClips(root.GroupId));
+        Assert.Equal(1, changes);
+        Assert.Equal(retained, library.ItemsSnapshot());
+        Assert.Equal(retainedGroups, library.GroupsSnapshot());
+        foreach (var item in removed)
+        {
+            Assert.Null(library.Find(item.ClipId));
+            Assert.False(File.Exists(library.AssetAbsolutePath(item)));
+        }
+        foreach (var item in retained) Assert.True(library.IsAvailable(item.ClipId));
+        foreach (var original in originalFiles) Assert.Equal(original.Value, File.ReadAllBytes(original.Key));
+        Assert.Equal(File.ReadAllBytes(export), File.ReadAllBytes(library.AssetAbsolutePath(outsideCrop)));
+        Assert.Equal(retained.Length, Directory.GetFiles(Path.Combine(library.Root, "assets")).Length);
+        Assert.Empty(Directory.GetDirectories(library.Root, ".delete-*"));
+        Assert.Empty(library.DeleteGroupAndClips(root.GroupId));
+        Assert.Equal(1, changes);
+
+        using var reopened = OpenLib();
+        Assert.Equal(retained, reopened.ItemsSnapshot());
+        Assert.Equal(retainedGroups, reopened.GroupsSnapshot());
+        Assert.Equal(cropOrigin, reopened.Find(outsideCrop.ClipId)!.Origin);
+        Assert.True(reopened.Find(outsideA.ClipId)!.Favorite);
+        Assert.Equal(0.5f, reopened.Find(outsideB.ClipId)!.Gain);
+    }
+
+    [Fact]
+    public void Empty_subtree_delete_still_commits_group_removal_and_missing_groups_do_nothing()
+    {
+        using var library = OpenLib();
+        var before = library.CreateGroup("Before")!;
+        var root = library.CreateGroup("Empty")!;
+        library.CreateGroup("Empty child", root.GroupId);
+        var after = library.CreateGroup("After")!;
+        var changes = 0;
+        library.Changed += () => changes++;
+
+        Assert.Empty(library.DeleteGroupAndClips(root.GroupId));
+        Assert.Equal(new[] { before, after }, library.GroupsSnapshot());
+        Assert.Equal(1, changes);
+        Assert.Empty(library.DeleteGroupAndClips("group-missing"));
+        Assert.Equal(1, changes);
+        using var reopened = OpenLib();
+        Assert.Equal(new[] { before, after }, reopened.GroupsSnapshot());
+        Assert.Empty(reopened.ItemsSnapshot());
+    }
+
+    [Fact]
+    public void Missing_managed_assets_do_not_block_subtree_deletion_or_affect_sources()
+    {
+        using var library = OpenLib();
+        var group = library.CreateGroup("Unavailable")!;
+        var item = library.Import(SourceFile("missing-managed.wav"), groupId: group.GroupId).Item;
+        File.Delete(library.AssetAbsolutePath(item));
+
+        Assert.Equal(new[] { item.ClipId }, library.DeleteGroupAndClips(group.GroupId));
+        Assert.True(File.Exists(item.OriginalImportPath));
+        Assert.Empty(library.ItemsSnapshot());
+        Assert.Empty(library.GroupsSnapshot());
+        Assert.Empty(Directory.GetDirectories(library.Root, ".delete-*"));
+        using var reopened = OpenLib();
+        Assert.Empty(reopened.ItemsSnapshot());
+        Assert.Empty(reopened.GroupsSnapshot());
+    }
+
+    [Fact]
+    public void Locked_later_subtree_asset_restores_earlier_staged_copies_and_the_entire_index()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var library = OpenLib();
+        var root = library.CreateGroup("Locked subtree")!;
+        var child = library.CreateGroup("Child", root.GroupId)!;
+        var first = library.Import(SourceFile("stage-first.wav"), groupId: root.GroupId).Item;
+        var outside = library.Import(SourceFile("keep-outside.wav")).Item;
+        var locked = library.Import(SourceFile("locked-last.wav"), groupId: child.GroupId).Item;
+        var beforeItems = library.ItemsSnapshot();
+        var beforeGroups = library.GroupsSnapshot();
+        var indexPath = Path.Combine(library.Root, "index.json");
+        var beforeIndex = File.ReadAllText(indexPath);
+        var bytes = beforeItems.ToDictionary(item => item.ClipId, item => File.ReadAllBytes(library.AssetAbsolutePath(item)));
+        var changes = 0;
+        library.Changed += () => changes++;
+        using (var reservation = new FileStream(library.AssetAbsolutePath(locked), FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            Assert.ThrowsAny<IOException>(() => library.DeleteGroupAndClips(root.GroupId));
+            Assert.Equal(beforeItems, library.ItemsSnapshot());
+            Assert.Equal(beforeGroups, library.GroupsSnapshot());
+            Assert.Equal(beforeIndex, File.ReadAllText(indexPath));
+            Assert.Equal(bytes[first.ClipId], File.ReadAllBytes(library.AssetAbsolutePath(first)));
+            Assert.True(File.Exists(library.AssetAbsolutePath(locked)));
+            Assert.Empty(Directory.GetDirectories(library.Root, ".delete-*"));
+            Assert.Equal(0, changes);
+        }
+
+        using (var reopened = OpenLib())
+        {
+            Assert.Equal(beforeItems, reopened.ItemsSnapshot());
+            Assert.Equal(beforeGroups, reopened.GroupsSnapshot());
+            foreach (var item in beforeItems) Assert.Equal(bytes[item.ClipId], File.ReadAllBytes(reopened.AssetAbsolutePath(item)));
+        }
+        Assert.Equal(new[] { first.ClipId, locked.ClipId }, library.DeleteGroupAndClips(root.GroupId));
+        Assert.Equal(outside, library.ItemsSnapshot().Single());
+        Assert.True(File.Exists(first.OriginalImportPath));
+        Assert.True(File.Exists(locked.OriginalImportPath));
+        Assert.Equal(1, changes);
+    }
+
+    [Fact]
+    public void Locked_single_clip_refuses_deletion_without_changing_memory_or_disk()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var library = OpenLib();
+        var item = library.Import(SourceFile("locked-single.wav")).Item;
+        var indexPath = Path.Combine(library.Root, "index.json");
+        var beforeIndex = File.ReadAllText(indexPath);
+        var changes = 0;
+        library.Changed += () => changes++;
+        using (var reservation = new FileStream(library.AssetAbsolutePath(item), FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            Assert.ThrowsAny<IOException>(() => library.Delete(item.ClipId));
+            Assert.Equal(item, library.Find(item.ClipId));
+            Assert.Equal(beforeIndex, File.ReadAllText(indexPath));
+            Assert.True(File.Exists(library.AssetAbsolutePath(item)));
+            Assert.Empty(Directory.GetDirectories(library.Root, ".delete-*"));
+            Assert.Equal(0, changes);
+        }
+        using var reopened = OpenLib();
+        Assert.Equal(item, reopened.Find(item.ClipId));
+        Assert.True(reopened.IsAvailable(item.ClipId));
+        Assert.True(File.Exists(item.OriginalImportPath));
+    }
+
+    [Fact]
+    public void Locked_selection_export_fails_before_decoding_or_publishing_assets()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var library = OpenLib();
+        var export = ExportedWav("locked-export.wav");
+        var origin = new ClipOrigin("trim", null, Path.Combine(_dir, "original.mp3"), 0, 100);
+        using var reservation = new FileStream(export, FileMode.Open, FileAccess.Read, FileShare.None);
+
+        Assert.ThrowsAny<IOException>(() => library.ImportSelection(export, origin, "Crop"));
+        Assert.Equal(0, _decoder.Calls);
+        Assert.Empty(library.ItemsSnapshot());
+        Assert.Empty(Directory.GetFiles(Path.Combine(library.Root, "assets")));
+        Assert.False(File.Exists(Path.Combine(library.Root, "index.json")));
+        Assert.True(File.Exists(export));
+    }
+
+    [Fact]
+    public void Readonly_export_remains_untouched_while_its_independent_managed_copy_is_deletable()
+    {
+        var export = ExportedWav("readonly-export.wav");
+        var originalAttributes = File.GetAttributes(export);
+        File.SetAttributes(export, originalAttributes | FileAttributes.ReadOnly);
+        try
+        {
+            using var library = OpenLib();
+            var origin = new ClipOrigin("trim", null, Path.Combine(_dir, "deleted-original.mp3"), 0, 100);
+            var bytes = File.ReadAllBytes(export);
+            var item = library.ImportSelection(export, origin, "Readonly source crop").Item;
+            var managed = library.AssetAbsolutePath(item);
+            Assert.False((File.GetAttributes(managed) & FileAttributes.ReadOnly) != 0);
+            Assert.True(library.Delete(item.ClipId));
+            Assert.False(File.Exists(managed));
+            Assert.Equal(bytes, File.ReadAllBytes(export));
+            Assert.Equal(originalAttributes | FileAttributes.ReadOnly, File.GetAttributes(export));
+            using var reopened = OpenLib();
+            Assert.Empty(reopened.ItemsSnapshot());
+        }
+        finally
+        {
+            File.SetAttributes(export, originalAttributes);
+        }
+    }
+
+    [Fact]
+    public void Folder_planning_retains_oversized_and_overlong_supported_sources_for_the_crop_flow()
+    {
+        using var library = OpenLib(new ClipLibraryLimits(8, 1));
+        var root = Path.Combine(_dir, "crop-before-import");
+        var wav = Write("crop-before-import/long.wav", new string('x', 64));
+        var mp3 = Write("crop-before-import/long.mp3", new string('y', 64));
+        _decoder.Generator = _ => new float[44100 * 2];
+
+        var plan = library.PrepareFolderImport([root]);
+        Assert.Equal(new[] { mp3, wav }, plan.Files.Select(file => file.Path));
+        Assert.All(plan.Files, file => Assert.Equal(plan.RootGroupIds.Single(), file.GroupId));
+        Assert.Equal(0, _decoder.Calls);
+        Assert.Empty(library.ItemsSnapshot());
+        Assert.Throws<ClipImportException>(() => library.Import(wav, groupId: plan.Files[1].GroupId));
+        Assert.True(File.Exists(wav));
+        Assert.True(File.Exists(mp3));
     }
 }
 

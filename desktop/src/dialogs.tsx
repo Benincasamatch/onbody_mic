@@ -6,6 +6,8 @@ import { useDesktop } from './context';
 import { desktopCommand, errorMessage } from './bridge';
 import type { AppInstance, AudioDevice, ClipItem, HotkeySection, PresetApplyResult, PresetConfig, SettingsData } from './types';
 import { descendantGroupIds, groupOptions, groupPath } from './library';
+import { AudioEditorDialog } from './AudioEditor';
+import type { ImportResult } from './types';
 
 export function DeviceDialog({ close, existing }: { close(): void; existing?: PresetConfig | null }) {
   const desktop = useDesktop();
@@ -115,6 +117,7 @@ export function ClipDialog({ clip, close, hotkeys }: { clip: ClipItem; close(): 
   const [gain, setGain] = useState(Math.round(clip.gain * 100));
   const [group, setGroup] = useState(clip.groupId ?? '');
   const [deleting, setDeleting] = useState(false);
+  const [editingAudio, setEditingAudio] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   async function save(event: FormEvent) {
@@ -124,11 +127,14 @@ export function ClipDialog({ clip, close, hotkeys }: { clip: ClipItem; close(): 
   }
   return <><Dialog title="音效详情与管理" close={close}><form onSubmit={event => { void save(event); }}>
     <div className="clip-dialog-summary"><span className="clip-art"><Icon name="audio" size={38} /></span><div><strong>{clip.displayName}</strong><p>{clip.format.toUpperCase()} · {(clip.durationMs / 1000).toFixed(2)}s · {clip.available ? '素材可用' : '素材文件缺失'}</p><small>{clip.clipId}</small></div></div>
+    {clip.origin && <p className="form-notice">最初来源：{clip.origin.originalPath} · 裁剪区间 {(clip.origin.startMs / 1000).toFixed(3)}–{(clip.origin.endMs / 1000).toFixed(3)} 秒（相对于{clip.origin.parentClipId ? '父音效' : '源文件'}）{clip.origin.parentClipId ? ` · 父音效 ID：${clip.origin.parentClipId}` : ''}。当前条目是独立素材副本。</p>}
     <label className="form-field">音效名称<input aria-label="音效名称" required value={name} onChange={event => setName(event.target.value)} /></label>
     <div className="form-two-columns"><label className="form-field">单条音效增益 (%)<input aria-label="单条音效增益" type="number" min="0" max="400" step="1" value={gain} onChange={event => setGain(Number(event.target.value))} /></label><label className="form-field">分组<Select aria-label="音效分组" value={group} onChange={setGroup} options={[{ value: '', label: '未分组' }, ...groupOptions(desktop.state?.engine?.groups ?? [])]} /></label></div>
+    <p className="form-notice">详情修改保存到当前条目；编辑音频则读取已保存的素材，创建独立的新条目，不覆盖当前音效。</p>
+    <div className="inline-actions"><Button disabled={busy || !clip.available} onClick={() => setEditingAudio(true)}><Icon name="audio" size={14} />编辑音频与波形</Button></div>
     <div className="inline-actions"><Button onClick={hotkeys}><Icon name="keyboard" size={14} />编辑播放热键</Button><Button onClick={() => { void desktop.perform<{ managedPath: string; originalPath: string | null }>('clip_path', { clipId: clip.clipId }).then(path => revealItemInDir(path.managedPath)).catch(failure => setError(errorMessage(failure))); }}><Icon name="folder" size={14} />打开文件位置</Button></div>
     <div className="dialog-actions"><Button variant="danger" disabled={busy} onClick={() => setDeleting(true)}><Icon name="delete" size={14} />删除副本</Button><Button onClick={close}>取消</Button><Button type="submit" variant="primary" disabled={busy}>{busy ? '正在保存…' : '保存修改'}</Button></div>
-  </form>{error && <p className="inline-error" role="alert">{error}</p>}</Dialog>{deleting && <ConfirmationDialog title="确认删除音效副本" close={() => setDeleting(false)} confirm={async () => { await desktop.perform('clip_delete', { clipId: clip.clipId }); close(); }} prepare={async () => { const references = await desktopCommand<{ presetId: string; name: string }[]>('clip_references', { clipId: clip.clipId }); return references.length ? `以下预设引用此条目：${references.map(reference => reference.name).join('、')}。引用会显示为缺失，请稍后处理。` : '当前可读取预设没有此条目的布局引用。'; }}><p>确定删除「{clip.displayName}」？只删除受管素材副本，不修改原文件。尚未保存的详情修改不会写入。</p></ConfirmationDialog>}</>;
+  </form>{error && <p className="inline-error" role="alert">{error}</p>}</Dialog>{editingAudio && <AudioEditorDialog key={clip.clipId} source={{ clipId: clip.clipId }} displayName={clip.displayName} groupId={clip.groupId} close={() => setEditingAudio(false)} save={async (selection, allowDuplicate) => { const result = await desktop.perform<ImportResult>('import_trimmed_audio', { clipId: clip.clipId, ...selection, allowDuplicate }); if (result.outcome === 'Imported') { desktop.selectClip(result.item.clipId); setEditingAudio(false); } return result; }} />}{deleting && <ConfirmationDialog title="确认删除音效副本" close={() => setDeleting(false)} confirm={async () => { await desktop.perform('clip_delete', { clipId: clip.clipId }); close(); }} prepare={async () => { const references = await desktopCommand<{ presetId: string; name: string }[]>('clip_references', { clipId: clip.clipId }); return references.length ? `以下预设引用此条目：${references.map(reference => reference.name).join('、')}。引用会显示为缺失，请稍后处理。` : '当前可读取预设没有此条目的布局引用。'; }}><p>确定删除「{clip.displayName}」？只删除受管素材副本，不修改原文件。尚未保存的详情修改不会写入。</p></ConfirmationDialog>}</>;
 }
 
 export function GroupsDialog({ close }: { close(): void }) {
@@ -136,17 +142,20 @@ export function GroupsDialog({ close }: { close(): void }) {
   const [name, setName] = useState('');
   const [edit, setEdit] = useState<{ id: string; name: string } | null>(null);
   const [deleting, setDeleting] = useState<{ id: string; name: string } | null>(null);
+  const [deleteContents, setDeleteContents] = useState(false);
   const [error, setError] = useState('');
   const groups = desktop.state?.engine?.groups ?? [];
+  const deletingIds = deleting ? descendantGroupIds(groups, deleting.id) : null;
+  const deletingClipCount = deletingIds ? (desktop.state?.engine?.clips ?? []).filter(clip => clip.groupId && deletingIds.has(clip.groupId)).length : 0;
   return <><Dialog title="管理音效分组" close={close}>
     <form className="inline-editor" onSubmit={event => { event.preventDefault(); void desktop.perform('group_create', { name }).then(() => setName('')).catch(failure => setError(errorMessage(failure))); }}><label className="form-field">新分组名称<input required aria-label="新分组名称" value={name} onChange={event => setName(event.target.value)} /></label><Button type="submit" variant="primary"><Icon name="plus" size={14} />创建</Button></form>
     <div className="group-list">{groupOptions(groups).map(option => {
       const group = groups.find(group => group.groupId === option.value)!;
       const ids = descendantGroupIds(groups, group.groupId);
-      return <div key={group.groupId} style={{ paddingLeft: `${(groupPath(groups, group.groupId).length - 1) * 18 + 4}px` }}><Icon name="folder" size={17} /><span title={option.label}>{group.name}</span><small>{desktop.state?.engine?.clips.filter(clip => clip.groupId && ids.has(clip.groupId)).length} 条音效</small><IconButton icon="more" label={`重命名分组${option.label}`} onClick={() => setEdit({ id: group.groupId, name: group.name })} /><IconButton icon="delete" label={`删除分组${option.label}`} onClick={() => setDeleting({ id: group.groupId, name: option.label })} /></div>;
+      return <div key={group.groupId} style={{ paddingLeft: `${(groupPath(groups, group.groupId).length - 1) * 18 + 4}px` }}><Icon name="folder" size={17} /><span title={option.label}>{group.name}</span><small>{desktop.state?.engine?.clips.filter(clip => clip.groupId && ids.has(clip.groupId)).length} 条音效</small><IconButton icon="more" label={`重命名分组${option.label}`} onClick={() => setEdit({ id: group.groupId, name: group.name })} /><IconButton icon="delete" label={`删除分组${option.label}`} onClick={() => { setDeleteContents(false); setDeleting({ id: group.groupId, name: option.label }); }} /></div>;
     })}</div>
     {edit && <form className="inline-editor" onSubmit={event => { event.preventDefault(); void desktop.perform('group_rename', { groupId: edit.id, name: edit.name }).then(() => setEdit(null)).catch(failure => setError(errorMessage(failure))); }}><input aria-label="分组新名称" required value={edit.name} onChange={event => setEdit(current => current ? { ...current, name: event.target.value } : null)} /><Button onClick={() => setEdit(null)}>取消</Button><Button type="submit">保存</Button></form>}{error && <p className="inline-error" role="alert">{error}</p>}
-  </Dialog>{deleting && <ConfirmationDialog title="确认删除分组" close={() => setDeleting(null)} confirm={async () => { const ids = descendantGroupIds(groups, deleting.id); await desktop.perform('group_delete', { groupId: deleting.id }); if (desktop.groupId && ids.has(desktop.groupId)) desktop.setGroupId(null); if (edit && ids.has(edit.id)) setEdit(null); }}><p>删除「{deleting.name}」及其所有子分组后，成员音效移到未分组，不会删除任何素材。</p></ConfirmationDialog>}</>;
+  </Dialog>{deleting && deletingIds && <ConfirmationDialog title="确认删除分组" close={() => setDeleting(null)} confirm={async () => { await desktop.perform(deleteContents ? 'group_delete_contents' : 'group_delete', { groupId: deleting.id }); if (desktop.groupId && deletingIds.has(desktop.groupId)) desktop.setGroupId(null); if (edit && deletingIds.has(edit.id)) setEdit(null); }}><p>「{deleting.name}」包括 {deletingIds.size - 1} 个子分组，共有 {deletingClipCount} 条音效（包含所有后代分组）。</p><label className="form-field">删除方式<Select aria-label="分组删除方式" value={deleteContents ? 'contents' : 'groups'} onChange={value => setDeleteContents(value === 'contents')} options={[{ value: 'groups', label: '只删除分组 · 保留音效并移到未分组' }, { value: 'contents', label: '删除分组及其中全部受管音效副本' }]} /></label><p>{deleteContents ? '将删除上述全部音效条目和受管素材副本，相关播放及热键引用会清理，预设中的引用可能显示缺失。此操作不可撤销。' : '成员音效移到未分组，音效条目、素材副本及收藏保持不变。'}</p><p className="form-notice">两种方式都不会修改或删除你最初导入的原始文件、原始文件夹。</p></ConfirmationDialog>}</>;
 }
 
 const actionLabels: Record<string, string> = { emergencyMute: '全部静音', stopClip: '停止音效', toggleMicSend: '真麦发送开关', toggleExtrasSend: '附加音频开关', toggleMonitor: '监听开关', playClip: '播放音效', selectPreset: '选择预设' };
@@ -215,7 +224,28 @@ export function DiagnosticsDialog({ close }: { close(): void }) {
   return <Dialog title="诊断与数据位置" close={close}><div className="diagnostic-status"><Icon name={engine ? 'activity' : 'info'} size={22} /><div><strong>{engine ? `引擎状态：${engine.status.phase}` : '音频后端不可用'}</strong><p>{desktop.state?.engineError ?? desktop.error ?? '状态仅表示本程序，不能证明远端接收。'}</p></div></div>{engine && <><h3>最近采样窗口峰值</h3><div className="metric-cards">{Object.entries(engine.levels).map(([key, value]) => <div key={key}><span>{key}</span><strong>{value > 0 ? (20 * Math.log10(value)).toFixed(1) + ' dB' : '−∞'}</strong></div>)}</div><h3>累计诊断计数（不是当前电平）</h3><pre className="diagnostic-json">{JSON.stringify(engine.metrics, null, 2)}</pre><h3>路由问题</h3>{engine.issues.length ? engine.issues.map((issue, index) => <p className="inline-error" key={index}>{issue.route}：{issue.reason}</p>) : <p className="muted">未报告路由问题</p>}{engine.libraryError && <p className="inline-error">音效库：{engine.libraryError}</p>}</>}<h3>本地数据目录</h3><code className="path-text">{desktop.state?.root ?? '尚未加载'}</code>{desktop.state?.settingsError && <p className="inline-error">配置读取失败：{errorMessage(desktop.state.settingsError)}；原文件未自动修复。</p>}<div className="dialog-actions"><Button onClick={() => { void desktop.perform('attach_output').catch(() => undefined); }} disabled={!engine?.status.devices}>明确重接输出</Button><Button onClick={() => { void desktop.perform('restart_engine').catch(() => undefined); }}>重启音频后端</Button></div><p className="form-notice">恢复仅恢复配置，所有发送与监听保持关闭。没有音频上传、遥测或自动录音。</p></Dialog>;
 }
 
+function DuplicateImportDialog() {
+  const desktop = useDesktop();
+  const guard = useRef(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState('');
+  async function resolve(allow: boolean) {
+    if (guard.current) return;
+    guard.current = true; setPending(true); setError('');
+    try { await desktop.resolveDuplicate(allow); }
+    catch (failure) { setError(errorMessage(failure)); }
+    finally { guard.current = false; setPending(false); }
+  }
+  return <Dialog title="发现重复音效" close={() => { void resolve(false); }} pending={pending}><p>音效库已有相同内容。跳过不会修改现有条目；继续将创建独立副本，并保留目标分组。处理后继续下一项。</p><code className="path-text">{desktop.duplicatePath}</code>{error && <p className="inline-error" role="alert">{error}</p>}<div className="dialog-actions"><Button disabled={pending} onClick={desktop.cancelImports}>取消剩余导入</Button><Button disabled={pending} onClick={() => { void resolve(false); }}>跳过此文件</Button><Button variant="primary" disabled={pending} onClick={() => { void resolve(true); }}>{pending ? '正在处理…' : '仍创建新副本'}</Button></div></Dialog>;
+}
+
 export function PendingDialogs() {
   const desktop = useDesktop();
-  return <>{desktop.duplicatePath && <Dialog title="发现重复音效" close={() => { void desktop.resolveDuplicate(false).catch(failure => desktop.notify(errorMessage(failure))); }}><p>音效库已有相同内容。跳过不会修改现有条目；继续将创建独立副本。</p><code className="path-text">{desktop.duplicatePath}</code><div className="dialog-actions"><Button onClick={() => { void desktop.resolveDuplicate(false).catch(failure => desktop.notify(errorMessage(failure))); }}>跳过此文件</Button><Button variant="primary" onClick={() => { void desktop.resolveDuplicate(true).catch(failure => desktop.notify(errorMessage(failure))); }}>仍创建新副本</Button></div></Dialog>}{desktop.leaveRequest && <Dialog title="预设有未保存修改" close={() => { void desktop.resolveLeave('cancel'); }}><p>增益、设备或音效库视图尚未保存。继续会丢弃当前预设的未保存修改。</p><div className="dialog-actions"><Button onClick={() => { void desktop.resolveLeave('cancel'); }}>取消</Button><Button onClick={() => { void desktop.resolveLeave('discard').catch(failure => desktop.notify(errorMessage(failure))); }}>不保存并继续</Button><Button variant="primary" onClick={() => { void desktop.resolveLeave('save').catch(failure => desktop.notify(errorMessage(failure))); }}>保存并继续</Button></div></Dialog>}{desktop.closeConfirmation && <Dialog title="关闭窗口后继续在托盘运行" close={() => { void desktop.closeToTray(false); }}><p>关闭窗口不会停止正在发送的音频。要彻底停止，请使用托盘退出；全部静音仍可通过热键操作。</p><div className="dialog-actions"><Button onClick={() => { void desktop.closeToTray(false); }}>取消关闭</Button><Button variant="primary" onClick={() => { void desktop.closeToTray(true).catch(failure => desktop.notify(errorMessage(failure))); }}>继续在托盘运行</Button></div></Dialog>}</>;
+  const crop = desktop.pendingAudioImport;
+  return <>
+    {crop && <AudioEditorDialog key={`${crop.file.path}:${crop.remaining}`} source={{ path: crop.file.path }} initialInspection={crop.inspection} displayName={crop.file.path.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || '新音效'} groupId={crop.file.groupId} reason={crop.reason} remaining={crop.remaining} close={desktop.skipAudioImport} cancelQueue={desktop.cancelImports} save={desktop.saveAudioImport} />}
+    {desktop.duplicatePath && <DuplicateImportDialog />}
+    {desktop.leaveRequest && <Dialog title="预设有未保存修改" close={() => { void desktop.resolveLeave('cancel'); }}><p>增益、设备或音效库视图尚未保存。继续会丢弃当前预设的未保存修改。</p><div className="dialog-actions"><Button onClick={() => { void desktop.resolveLeave('cancel'); }}>取消</Button><Button onClick={() => { void desktop.resolveLeave('discard').catch(failure => desktop.notify(errorMessage(failure))); }}>不保存并继续</Button><Button variant="primary" onClick={() => { void desktop.resolveLeave('save').catch(failure => desktop.notify(errorMessage(failure))); }}>保存并继续</Button></div></Dialog>}
+    {desktop.closeConfirmation && <Dialog title="关闭窗口后继续在托盘运行" close={() => { void desktop.closeToTray(false); }}><p>关闭窗口不会停止正在发送的音频。要彻底停止，请使用托盘退出；全部静音仍可通过热键操作。</p><div className="dialog-actions"><Button onClick={() => { void desktop.closeToTray(false); }}>取消关闭</Button><Button variant="primary" onClick={() => { void desktop.closeToTray(true).catch(failure => desktop.notify(errorMessage(failure))); }}>继续在托盘运行</Button></div></Dialog>}
+  </>;
 }

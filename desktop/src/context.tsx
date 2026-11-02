@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import type { ClipItem, DesktopState, FolderImportResult, ImportFile, ImportResult, PresetApplyResult, PresetConfig, RuntimeState } from './types';
+import type { AudioInspection, AudioSelection, ClipItem, DesktopState, FolderImportResult, ImportFile, ImportResult, PendingAudioImport, PresetApplyResult, PresetConfig, RuntimeState } from './types';
 import { desktopCommand, desktopState, errorMessage, nativeRuntime } from './bridge';
 import { descendantGroupIds } from './library';
 
@@ -23,6 +23,10 @@ export interface DesktopContextValue {
   importPaths(paths: string[]): Promise<void>;
   duplicatePath: string | null;
   resolveDuplicate(allow: boolean): Promise<void>;
+  pendingAudioImport: PendingAudioImport | null;
+  saveAudioImport(selection: AudioSelection, allowDuplicate?: boolean): Promise<ImportResult>;
+  skipAudioImport(): Promise<void>;
+  cancelImports(): void;
   dirty: boolean;
   currentConfig: PresetConfig | null;
   leaveRequest: LeaveRequest | null;
@@ -58,6 +62,7 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
   const [groupId, setGroupId] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [duplicate, setDuplicate] = useState<ImportFile | null>(null);
+  const [pendingAudioImport, setPendingAudioImport] = useState<PendingAudioImport | null>(null);
   const [leaveRequest, setLeaveRequest] = useState<LeaveRequest | null>(null);
   const [closeConfirmation, setCloseConfirmation] = useState(false);
   const mounted = useRef(true);
@@ -66,6 +71,7 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
   const presetView = useRef<string | null>(null);
   const importQueue = useRef<ImportFile[]>([]);
   const duplicateRef = useRef<ImportFile | null>(null);
+  const pendingAudioRef = useRef<PendingAudioImport | null>(null);
   const dirtyRef = useRef(false);
   const configRef = useRef<PresetConfig | null>(null);
 
@@ -92,9 +98,10 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
   async function perform<T>(op: string, args: object = {}): Promise<T> {
     try {
       const result = await desktopCommand<T>(op, args);
-      if (['preset_apply', 'preset_create', 'preset_save', 'preset_rename', 'preset_duplicate', 'preset_delete', 'preset_restore', 'settings_save', 'set_transparency', 'restart_engine', 'prepare_folder_import', 'import_clip', 'clip_delete', 'clip_rename', 'clip_group', 'group_create', 'group_rename', 'group_delete', 'clip_favorite', 'clip_gain'].includes(op)) await refresh();
+      if (['preset_apply', 'preset_create', 'preset_save', 'preset_rename', 'preset_duplicate', 'preset_delete', 'preset_restore', 'settings_save', 'set_transparency', 'restart_engine', 'prepare_folder_import', 'import_clip', 'import_trimmed_audio', 'clip_delete', 'clip_rename', 'clip_group', 'group_create', 'group_rename', 'group_delete', 'group_delete_contents', 'clip_favorite', 'clip_gain'].includes(op)) await refresh();
       return result;
     } catch (failure) {
+      if (op === 'group_delete_contents') await refresh();
       setToast(errorMessage(failure));
       throw failure;
     }
@@ -136,6 +143,12 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
       setGroupId(preset.libraryGroupId);
     } else if (!preset) { presetView.current = null; }
   }, [state?.activePreset?.presetId]);
+
+  useEffect(() => {
+    if (!state?.engine) return;
+    if (groupId && !state.engine.groups.some(group => group.groupId === groupId)) setGroupId(null);
+    if (selectedId && !state.engine.clips.some(clip => clip.clipId === selectedId)) setSelectedId(state.engine.clips[0]?.clipId ?? null);
+  }, [state?.engine?.groups, state?.engine?.clips, groupId, selectedId]);
 
   const clips = state?.engine?.clips ?? [];
   const normalized = query.trim().toLocaleLowerCase();
@@ -184,28 +197,40 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
     else if (request.presetId) await perform('preset_apply', { presetId: request.presetId });
   }
 
+  function suspendAudioImport(file: ImportFile, inspection: AudioInspection | null, reason: string) {
+    const pending = { file, inspection, reason, remaining: importQueue.current.length - 1 };
+    pendingAudioRef.current = pending;
+    setPendingAudioImport(pending);
+  }
   async function drainImports() {
+    if (importingRef.current || pendingAudioRef.current || duplicateRef.current) return;
     importingRef.current = true;
     setImporting(true);
     try {
       while (importQueue.current.length) {
         const file = importQueue.current[0];
-        const result = await perform<ImportResult>('import_clip', file);
-        importQueue.current.shift();
+        let inspection: AudioInspection;
+        try { inspection = await desktopCommand<AudioInspection>('inspect_audio', { path: file.path }); }
+        catch (failure) { suspendAudioImport(file, null, `无法读取此文件：${errorMessage(failure)}`); return; }
+        if (inspection.durationMs > 60000) {
+          suspendAudioImport(file, inspection, '源文件超过 60 秒，请先选择不超过 60 秒的片段。');
+          return;
+        }
+        let result: ImportResult;
+        try { result = await perform<ImportResult>('import_clip', file); }
+        catch (failure) { suspendAudioImport(file, inspection, `普通导入未完成：${errorMessage(failure)}。可以裁剪后创建新音效、跳过或取消剩余队列。`); return; }
         if (result.outcome === 'Duplicate') {
           duplicateRef.current = file;
           setDuplicate(file);
           return;
         }
+        importQueue.current.shift();
         setSelectedId(result.item.clipId);
       }
-    } catch (failure) {
-      importQueue.current = [];
-      throw failure;
     } finally { importingRef.current = false; if (mounted.current) setImporting(false); }
   }
   async function importPaths(paths: string[]) {
-    if (importingRef.current || duplicateRef.current || importQueue.current.length) throw new Error('请先处理当前导入请求');
+    if (importingRef.current || pendingAudioRef.current || duplicateRef.current || importQueue.current.length) throw new Error('请先处理当前导入请求');
     importingRef.current = true;
     setImporting(true);
     try {
@@ -230,9 +255,45 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
         setSelectedId(result.item.clipId);
       } finally { importingRef.current = false; if (mounted.current) setImporting(false); }
     }
+    importQueue.current.shift();
     duplicateRef.current = null;
     setDuplicate(null);
     await drainImports();
+  }
+  async function saveAudioImport(selection: AudioSelection, allowDuplicate = false) {
+    const pending = pendingAudioRef.current;
+    if (!pending || importingRef.current) throw new Error('当前没有可保存的裁剪导入请求');
+    importingRef.current = true;
+    setImporting(true);
+    let result: ImportResult;
+    try {
+      result = await perform<ImportResult>('import_trimmed_audio', { path: pending.file.path, ...selection, groupId: pending.file.groupId, allowDuplicate });
+      if (result.outcome === 'Imported') {
+        importQueue.current.shift();
+        pendingAudioRef.current = null;
+        setPendingAudioImport(null);
+        setSelectedId(result.item.clipId);
+      }
+    } finally { importingRef.current = false; if (mounted.current) setImporting(false); }
+    if (result.outcome === 'Imported') await drainImports();
+    return result;
+  }
+  async function skipAudioImport() {
+    if (!pendingAudioRef.current || importingRef.current) return;
+    importQueue.current.shift();
+    pendingAudioRef.current = null;
+    setPendingAudioImport(null);
+    await drainImports();
+  }
+  function cancelImports() {
+    if (importingRef.current) return;
+    const remaining = importQueue.current.length;
+    importQueue.current = [];
+    pendingAudioRef.current = null;
+    duplicateRef.current = null;
+    setPendingAudioImport(null);
+    setDuplicate(null);
+    setToast(`已取消 ${remaining} 个尚未导入的文件；已导入音效和创建的分组保留，原文件未修改。`);
   }
   async function closeToTray(keep: boolean) {
     if (keep) await perform('hide_window');
@@ -243,6 +304,7 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
     state, error, toast, selectedClip, selectClip: setSelectedId, query, setQuery,
     favoritesOnly, setFavoritesOnly, groupId, setGroupId, filteredClips,
     importing, importPaths, duplicatePath: duplicate?.path ?? null, resolveDuplicate,
+    pendingAudioImport, saveAudioImport, skipAudioImport, cancelImports,
     dirty, currentConfig, leaveRequest, resolveLeave, requestPreset,
     closeConfirmation, closeToTray, perform, refresh, notify: setToast,
   };

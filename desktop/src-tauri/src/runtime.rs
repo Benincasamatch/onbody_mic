@@ -319,8 +319,19 @@ impl DesktopRuntime {
             "clip_delete" => {
                 let id = required_string(&args, "clipId")?.to_owned();
                 let result = self.backend()?.request(op, args).await?;
-                self.store.lock().expect("configuration store poisoned").remove_clip_hotkey(&id)?;
+                self.store.lock().expect("configuration store poisoned").remove_clip_hotkeys(std::iter::once(id.as_str()))?;
                 self.emit_changed();
+                Ok(result)
+            }
+            "group_delete_contents" => {
+                let result = self.backend()?.request(op, args).await?;
+                let deleted = result.get("deletedClipIds").and_then(Value::as_array)
+                    .filter(|ids| ids.iter().all(Value::is_string))
+                    .ok_or_else(|| CommandError::new("protocol-error", "分组删除结果缺少音效 ID 列表"))?;
+                let cleanup = self.store.lock().expect("configuration store poisoned")
+                    .remove_clip_hotkeys(deleted.iter().map(|id| id.as_str().expect("validated clip ID")));
+                self.emit_changed();
+                cleanup.map_err(|error| CommandError::new("settings-save-failed", format!("分组及音效副本已删除，但热键清理未保存：{error}")))?;
                 Ok(result)
             }
             "set_transparency" => {
@@ -343,7 +354,7 @@ impl DesktopRuntime {
                 }
                 self.app.exit(0); Ok(Value::Bool(true))
             }
-            "snapshot" | "devices" | "device_enable" | "apps" | "bind_app" | "route" | "gains" | "play" | "stop" | "mute" | "unlock" | "attach_output" | "prepare_folder_import" | "import_clip" | "clip_rename" | "clip_favorite" | "clip_gain" | "clip_group" | "group_create" | "group_rename" | "group_delete" | "clip_path" | "hotkeys_suspend" => self.backend()?.request(op, args).await,
+            "snapshot" | "devices" | "device_enable" | "apps" | "bind_app" | "route" | "gains" | "play" | "stop" | "mute" | "unlock" | "attach_output" | "prepare_folder_import" | "import_clip" | "inspect_audio" | "preview_audio" | "import_trimmed_audio" | "release_audio_preview" | "clip_rename" | "clip_favorite" | "clip_gain" | "clip_group" | "group_create" | "group_rename" | "group_delete" | "clip_path" | "hotkeys_suspend" => self.backend()?.request(op, args).await,
             _ => Err(CommandError::new("invalid-argument", format!("不支持的桌面操作: {op}"))),
         }
     }

@@ -63,7 +63,7 @@ export function ConfirmationDialog({ title, close, confirm, children, prepare }:
     finally { guard.current = false; setLoading(false); }
   }
   function cancel() { if (!guard.current) close(); }
-  return <Dialog title={title} close={cancel} pending={pending}><div className="confirmation-content">{children}{loading && <p role="status">正在读取引用…</p>}{detail && <p>{detail}</p>}{error && <p className="inline-error" role="alert">{error}</p>}</div><div className="dialog-actions">{!prepared && !loading && <Button onClick={() => { void retry(); }}>重试读取</Button>}<Button autoFocus disabled={pending} onClick={cancel}>取消删除</Button><Button variant="danger" disabled={pending || loading || !prepared} onClick={() => { void accept(); }}>{pending ? '正在删除…' : title}</Button></div></Dialog>;
+  return <Dialog title={title} close={cancel} pending={pending}><fieldset className="confirmation-content" disabled={pending}>{children}{loading && <p role="status">正在读取引用…</p>}{detail && <p>{detail}</p>}{error && <p className="inline-error" role="alert">{error}</p>}</fieldset><div className="dialog-actions">{!prepared && !loading && <Button onClick={() => { void retry(); }}>重试读取</Button>}<Button autoFocus disabled={pending} onClick={cancel}>取消删除</Button><Button variant="danger" disabled={pending || loading || !prepared} onClick={() => { void accept(); }}>{pending ? '正在删除…' : title}</Button></div></Dialog>;
 }
 export function WindowHeader({ openPanel, children }: { openPanel(kind: PanelKind): void; children?: ReactNode }) {
   const desktop = useDesktop();
@@ -112,9 +112,9 @@ export function ClipGrid({ edit }: { edit(clip: ClipItem): void }) {
 
 export function ImportButton() {
   const desktop = useDesktop();
-  const disabled = !nativeRuntime || !desktop.state?.engine || Boolean(desktop.state.engine.libraryError) || desktop.importing || Boolean(desktop.duplicatePath);
+  const disabled = !nativeRuntime || !desktop.state?.engine || Boolean(desktop.state.engine.libraryError) || desktop.importing || Boolean(desktop.duplicatePath) || Boolean(desktop.pendingAudioImport);
   function pick(directory: boolean) {
-    void open({ multiple: true, directory, ...(!directory ? { filters: [{ name: '短音效', extensions: ['wav', 'mp3'] }] } : {}) }).then(paths => { if (paths) return desktop.importPaths(Array.isArray(paths) ? paths : [paths]); }).catch(failure => desktop.notify(errorMessage(failure)));
+    void open({ multiple: true, directory, ...(!directory ? { filters: [{ name: '音频（长文件可裁剪）', extensions: ['wav', 'mp3'] }] } : {}) }).then(paths => { if (paths) return desktop.importPaths(Array.isArray(paths) ? paths : [paths]); }).catch(failure => desktop.notify(errorMessage(failure)));
   }
   return <div className="import-actions"><Button disabled={disabled} onClick={() => pick(false)}><Icon name="plus" size={15} />{desktop.importing ? '正在导入…' : '导入音效'}</Button><Button disabled={disabled} onClick={() => pick(true)}><Icon name="folder" size={15} />导入文件夹</Button></div>;
 }
@@ -137,5 +137,6 @@ export function PlaybackStrip() {
   const desktop = useDesktop();
   const status = desktop.state?.engine?.status;
   const active = status?.clip && desktop.state?.engine?.clips.find(clip => clip.clipId === status.clip?.clipId);
-  return <div className="playback-strip"><span className="playback-art"><Icon name="audio" size={21} /></span><div className="playback-copy"><strong>{status?.clipLoading ? '正在加载音效' : active?.displayName ?? '音效待命'}</strong><span>{status?.clipLoading ? '停止或全部静音可取消旧请求' : status?.clip ? status.clip.mode === 'Preview' ? '仅本地试听 · 不向外发送' : '经附加音频路径发送' : '本地试听与对外发送清楚分开'}</span></div><span className="playback-state">{status?.clip ? status.clip.mode === 'Preview' ? '试听中' : '发送中' : '空闲'}</span><Button variant="ghost" disabled={!status || (!status.clip && !status.clipLoading)} onClick={() => { void desktop.perform('stop').catch(() => undefined); }}><Icon name="stop" size={14} />停止音效</Button></div>;
+  const editorPreview = status?.clip?.mode === 'Preview' && status.clip.clipId.startsWith('editor-preview:');
+  return <div className="playback-strip"><span className="playback-art"><Icon name="audio" size={21} /></span><div className="playback-copy"><strong>{status?.clipLoading ? '正在加载音效' : editorPreview ? '编辑器选区试听' : active?.displayName ?? '音效待命'}</strong><span>{status?.clipLoading ? '停止或全部静音可取消旧请求' : status?.clip ? status.clip.mode === 'Preview' ? '仅本地试听 · 不向外发送' : '经附加音频路径发送' : '本地试听与对外发送清楚分开'}</span></div><span className="playback-state">{status?.clip ? status.clip.mode === 'Preview' ? '试听中' : '发送中' : '空闲'}</span><Button variant="ghost" disabled={!status || (!status.clip && !status.clipLoading)} onClick={() => { void desktop.perform('stop').catch(() => undefined); }}><Icon name="stop" size={14} />停止音效</Button></div>;
 }

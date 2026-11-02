@@ -4,6 +4,7 @@ using OnbodyMic.Application;
 using OnbodyMic.Audio;
 using OnbodyMic.Domain;
 using OnbodyMic.Media;
+using OnbodyMic.Platform.Windows;
 
 internal sealed class SettingsData
 {
@@ -96,12 +97,25 @@ internal sealed class MonitorPreferencesData
 internal sealed record ClipItemData(
     string ClipId, string DisplayName, string ManagedAssetPath, string? OriginalImportPath,
     int DurationMs, string Format, bool Favorite, string? GroupId, float Gain,
-    long ImportUnixMs, bool Available)
+    long ImportUnixMs, bool Available, ClipOriginData? Origin = null)
 {
     public static ClipItemData FromDomain(ClipItem item, ClipLibrary library) => new(
         item.ClipId, item.DisplayName, item.ManagedAssetPath, item.OriginalImportPath,
         item.DurationMs, item.Format, item.Favorite, item.GroupId, item.Gain,
-        item.ImportUnixMs, File.Exists(library.AssetAbsolutePath(item)));
+        item.ImportUnixMs, File.Exists(library.AssetAbsolutePath(item)),
+        item.Origin is { } origin ? ClipOriginData.FromDomain(origin) : null);
+}
+
+internal sealed record ClipOriginData(string Kind, string? ParentClipId, string OriginalPath, int StartMs, int EndMs)
+{
+    public static ClipOriginData FromDomain(ClipOrigin origin) => new(
+        origin.Kind, origin.ParentClipId, origin.OriginalPath, origin.StartMs, origin.EndMs);
+}
+
+internal sealed record AudioInspectionData(double DurationMs, int SampleRate, int Channels, float[] Peaks, string SourceVersion)
+{
+    public static AudioInspectionData FromPlatform(AudioFileInspection inspection) => new(
+        inspection.DurationMs, inspection.SampleRate, inspection.Channels, inspection.Peaks, inspection.SourceVersion);
 }
 
 internal sealed record ImportResultData(string Outcome, ClipItemData Item, ClipItemData? ExistingDuplicate);

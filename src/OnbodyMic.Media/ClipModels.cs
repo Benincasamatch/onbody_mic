@@ -1,5 +1,7 @@
 namespace OnbodyMic.Media;
 
+public sealed record ClipOrigin(string Kind, string? ParentClipId, string OriginalPath, int StartMs, int EndMs);
+
 /// <summary>One soundboard entry. The stable <see cref="ClipId"/> is the only thing presets, hotkeys and the cache reference (docs/06 §4.3).</summary>
 public sealed record ClipItem(
     string ClipId,
@@ -11,7 +13,8 @@ public sealed record ClipItem(
     bool Favorite,
     string? GroupId,
     float Gain,
-    long ImportUnixMs);
+    long ImportUnixMs,
+    ClipOrigin? Origin = null);
 
 public sealed record ClipGroup(string GroupId, string Name, string? ParentGroupId = null);
 

@@ -19,9 +19,31 @@
 
 DTO 的当前字段以 `models.rs` / `Contracts.cs` 为准，不把 §4 中的 JSON 示意当成磁盘格式。音频帧不经 IPC 传入网页；设备句柄和缓冲仍归 C# 音频层。所有按钮与热键通过现有有序会话控制通道，较慢的解码/导入工作不阻塞该通道；迟到结果按播放意图和来源/会话代数拒绝。
 
-默认数据根目录仍为 `%LOCALAPPDATA%\OnbodyMic`，可用 `--root` 隔离验证。Rust 将读取的预设目录和设置快照交给后端，后端不重写这些文件；素材及库索引仍由现有 C# 实现维护。删除音效会清理对应热键与预设引用；删除活动预设先撤销当前配置，不选取其他预设作为回退。
+默认数据根目录仍为 `%LOCALAPPDATA%\OnbodyMic`，可用 `--root` 隔离验证。Rust 将预设目录和设置快照交给后端，后端不重写这些文件；素材及库索引由 C# 维护。删除音效清理对应热键，预设布局引用保留并可显示缺失；删除活动预设先撤销配置，不选取其他预设作为回退。
 
-首次启动、切预设、恢复配置和明确重启后端均不恢复发送、监听、播放或当前 PID 绑定。退出桌面会停止后端；普通关闭到托盘不会冒充退出。网页/应用采集及裁剪的 P5 字段尚未实现，不在本次 schema v1 中虚设占位字段。
+首次启动、切预设、恢复配置和明确重启后端均不恢复发送、监听、播放或 PID 绑定。退出停止后端，普通关闭到托盘不会冒充退出。网页/应用录制草稿仍未实现；文件和受管音效裁剪已按用户追加需求接入，实际契约如下。
+
+### 0.1 音效导入、波形与删除
+
+| 操作 | 参数/响应与约束 |
+| --- | --- |
+| `prepare_folder_import` | 混合 `paths` → 有序 `files[{path,groupId}]` 与 `rootGroupIds`；递归自然排序、跳过重解析目录，保留目录层级，不提前按成品大小/时长筛掉长源 |
+| `import_clip` | `path`、可选 `displayName/groupId/allowDuplicate` → `Imported` 或 `Duplicate`；只有新副本分组，既有重复条目不改 |
+| `inspect_audio` | 恰有 `path` 或 `clipId` → `durationMs/sampleRate/channels/peaks/sourceVersion`；`peaks` 为最多 2048 个交错 min/max 桶，流式读真实 WAV/MP3 |
+| `preview_audio` | 同一来源、`sourceVersion/startMs/endMs`；选区须在源内、0–60 秒，内部 `editor-preview:<guid>` 只走本地试听，不对外发送 |
+| `release_audio_preview` | 取消编辑器准备并等待临时文件清理；只停止当前编辑器试听，不停止无关旧音效 |
+| `import_trimmed_audio` | 同一来源/版本/区间，加新名称、分组和重复选择；分段导出 44.1 kHz 单声道 float WAV，验证成品 ≤60 秒/32 MB，分配独立 ID |
+| `group_delete` | 删除分组树并将成员移到未分组，保留音效与文件 |
+| `group_delete_contents` | 删除分组树和其全部受管副本 → `deletedClipIds`；文件锁或索引失败回滚，停止受影响播放并清理相应热键，Rust 一次保存热键删除 |
+
+MP3 使用 NAudio `StreamMediaFoundationReader`，不把 `\\?\` 文件名当成 Media Foundation URL，不剥离长路径前缀。选区/源文件检查、解码和导入不占用会话控制线程；停止、静音、切预设或取消令迟到准备结果失效。
+
+素材库读取 schema 1/2，成功变更写 schema 2；`groups[].parentGroupId` 表示层级，索引数组保存文件夹/导入顺序。`items[].origin` 对裁剪条目保存 `{kind:"trim",parentClipId,originalPath,startMs,endMs}`；普通旧条目可无来源字段。时间相对于本次输入；有父 ID 时相对于父音效，`originalPath` 仅保存最初来源。派生拥有独立素材，父 ID 缺失不影响播放；无效来源或循环/孤立分组拒绝加载，旧索引读取本身不写盘。
+
+### 0.2 应用选择与捕获
+
+应用行包含 `processId/executablePath/displayName/category/startTimeTicks`，`category` 顺序为 `taskbar/tray/background`；无法可靠归属托盘时保守归为后台。同路径的真实祖先链才归并，独立根不合并。`startTimeTicks` 使用十进制字符串，避免 JavaScript 整数精度损失；`bind_app` 必须回传此身份，捕获保留进程句柄并验证启动时间，PID 重用不被静默接受。采集缓冲复用，异步 HRESULT 故障如实报告；根退出关闭该路授权，不回退系统回环。
+
 
 ## 1. 工程基线与术语
 
@@ -195,7 +217,7 @@ P3 实现补充（2026-10-26，工程登记）：`virtualOutput.captureDeviceSta
 
 素材二进制存于受管库，预设/热键只引用 `clipId`。收藏与单级分组属于全局库；每条音效的增益乘以预设音效总线增益，仍受最终峰值保护。删除库素材前检查所有预设布局和全局热键引用；删除分组将素材移到未分组，绝不删除素材文件。索引中的时长仅为示意，实际导入必须解码校验。
 
-> P5B 待实现时会新增采集/裁剪来源与区间字段并升级 `schemaVersion`，旧索引须可迁移；本条不改变当前 v1 契约。具体字段在实现前列入本文件。
+> 上述是早期 v1 示意；本轮已实现的裁剪来源、嵌套分组与 schema 2 以 §0.1 为准。应用录制草稿的来源扩展仍属 P5A 计划。
 
 ## 5. 会话状态与开关真值
 

@@ -64,13 +64,18 @@ impl Store {
         Ok(())
     }
 
-    pub fn remove_clip_hotkey(&mut self, id: &str) -> AppResult<()> {
-        let removed = Arc::make_mut(&mut self.settings).clip_hotkeys.shift_remove_full(id);
-        if let Some((index, key, value)) = removed {
-            if let Err(error) = self.persist_current() {
-                Arc::make_mut(&mut self.settings).clip_hotkeys.shift_insert(index, key, value);
-                return Err(error);
+    pub fn remove_clip_hotkeys<'a>(&mut self, ids: impl IntoIterator<Item = &'a str>) -> AppResult<()> {
+        let mut removed = Vec::new();
+        for id in ids {
+            if let Some(entry) = Arc::make_mut(&mut self.settings).clip_hotkeys.shift_remove_full(id) {
+                removed.push(entry);
             }
+        }
+        if removed.is_empty() { return Ok(()); }
+        if let Err(error) = self.persist_current() {
+            let hotkeys = &mut Arc::make_mut(&mut self.settings).clip_hotkeys;
+            for (index, key, value) in removed.into_iter().rev() { hotkeys.shift_insert(index, key, value); }
+            return Err(error);
         }
         Ok(())
     }
@@ -511,6 +516,36 @@ mod tests {
 
     fn preset(id: &str, name: &str) -> PresetConfig {
         PresetConfig { preset_id: id.into(), name: name.into(), devices: DeviceConfig { mic_device_id: "mic-id".into(), virtual_render_device_id: "render-id".into(), virtual_capture_device_id: Some("capture-id".into()), monitor_device_id: "headphones-id".into(), application: Some(AppSelection { executable_path: Some("C:\\Apps\\音乐.exe".into()), display_name: Some("音乐播放器".into()) }) }, mic_gain: 1.25, app_gain: 0.7, clip_gain: 1.0, monitor: MonitorPreferences { mode: "FullEndpoint".into(), gain: 0.65 }, clip_layout: vec!["clip-stable-id".into()], library_favorites_only: true, library_group_id: Some("group-stable-id".into()) }
+    }
+
+    #[test]
+    fn deleting_multiple_clips_preserves_unrelated_bindings_after_reopen() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        fs::write(&path, br#"{"schemaVersion":1,"clipHotkeys":{"clip-a":"A","outside":"F9","clip-b":"B"},"globalHotkeys":{},"presetHotkeys":{},"ui":{}}"#).unwrap();
+        let mut store = Store::open(directory.path().into()).unwrap();
+        store.remove_clip_hotkeys(["clip-b", "missing", "clip-a"]).unwrap();
+        let reopened = Store::open(directory.path().into()).unwrap();
+        assert_eq!(reopened.settings().clip_hotkeys.keys().map(String::as_str).collect::<Vec<_>>(), vec!["outside"]);
+        assert_eq!(reopened.settings().clip_hotkeys["outside"].as_deref(), Some("F9"));
+    }
+
+    #[test]
+    fn failed_batch_cleanup_restores_binding_values_and_original_order() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let original = br#"{"schemaVersion":1,"clipHotkeys":{"clip-a":"A","clip-b":null,"outside":"F9","clip-c":"C"},"globalHotkeys":{},"presetHotkeys":{},"ui":{}}"#;
+        fs::write(&path, original).unwrap();
+        let mut store = Store::open(directory.path().into()).unwrap();
+        let retained = directory.path().join("retained-settings.json");
+        fs::rename(&path, &retained).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(store.remove_clip_hotkeys(["clip-c", "clip-a", "clip-b"]).is_err());
+        assert_eq!(store.settings().clip_hotkeys.keys().map(String::as_str).collect::<Vec<_>>(), vec!["clip-a", "clip-b", "outside", "clip-c"]);
+        assert_eq!(store.settings().clip_hotkeys["clip-a"].as_deref(), Some("A"));
+        assert_eq!(store.settings().clip_hotkeys["clip-b"], None);
+        assert_eq!(store.settings().clip_hotkeys["clip-c"].as_deref(), Some("C"));
+        assert_eq!(fs::read(&retained).unwrap(), original);
     }
 
     #[test]

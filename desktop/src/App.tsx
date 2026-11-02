@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Button, ClipGrid, GroupNavigation, Icon, IconButton, ImportButton, PlaybackStrip, RouteCard, Select, WindowHeader } from './components';
 import { AppPickerDialog, ClipDialog, DeviceDialog, DiagnosticsDialog, GroupsDialog, HotkeysDialog, PendingDialogs, PresetsDialog } from './dialogs';
@@ -12,6 +12,8 @@ const routes: readonly RouteId[] = ['mic', 'app', 'extras', 'monitor'];
 
 export default function App() {
   const desktop = useDesktop();
+  const desktopRef = useRef(desktop);
+  desktopRef.current = desktop;
   const updater = useUpdater(desktop.state?.version);
   const version = updater.info?.build.version ?? desktop.state?.version ?? '…';
   const [aboutOpen, setAboutOpen] = useState(false);
@@ -33,7 +35,7 @@ export default function App() {
     let stopped = false;
     let unsubscribe: (() => void) | undefined;
     void getCurrentWindow().onDragDropEvent(event => {
-      if (event.payload.type === 'drop') void desktop.importPaths(event.payload.paths).catch(failure => desktop.notify(errorMessage(failure)));
+      if (event.payload.type === 'drop') void desktopRef.current.importPaths(event.payload.paths).catch(failure => desktopRef.current.notify(errorMessage(failure)));
     }).then(dispose => { if (stopped) dispose(); else unsubscribe = dispose; }).catch(failure => desktop.notify(errorMessage(failure)));
     return () => { stopped = true; unsubscribe?.(); };
   }, []);

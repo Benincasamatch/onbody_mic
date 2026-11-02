@@ -56,6 +56,7 @@ export interface ClipItem {
   gain: number;
   importUnixMs: number;
   available: boolean;
+  origin?: ClipOrigin | null;
 }
 export interface ClipGroup { groupId: string; name: string; parentGroupId: string | null }
 export interface AudioDevice { id: string; friendlyName: string; dataFlow: 'Render' | 'Capture'; state: string; isDefault: boolean }
@@ -113,5 +114,10 @@ export interface PresetApplyResult {
   outputAttachRejection: string | null;
 }
 export interface ImportResult { outcome: 'Imported' | 'Duplicate'; item: ClipItem; existingDuplicate: ClipItem | null }
+export interface ClipOrigin { kind: string; parentClipId: string | null; originalPath: string; startMs: number; endMs: number }
+export type AudioSource = { path: string; clipId?: never } | { clipId: string; path?: never };
+export interface AudioInspection { durationMs: number; sampleRate: number; channels: number; peaks: number[]; sourceVersion: string }
+export interface AudioSelection { sourceVersion: string; startMs: number; endMs: number; displayName: string; groupId: string | null }
+export interface PendingAudioImport { file: ImportFile; inspection: AudioInspection | null; reason: string; remaining: number }
 export interface ImportFile { path: string; groupId: string | null }
 export interface FolderImportResult { files: ImportFile[]; rootGroupIds: string[] }

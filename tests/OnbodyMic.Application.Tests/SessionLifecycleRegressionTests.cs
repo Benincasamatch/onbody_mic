@@ -133,6 +133,112 @@ public sealed class SessionLifecycleRegressionTests
         Assert.All(rig.Outputs.Last().Pump(32), sample => Assert.Equal(0, sample));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Canceling_editor_preview_decode_preserves_the_unrelated_playing_sound(bool sending)
+    {
+        using var decoding = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        using var cancellation = new CancellationTokenSource();
+        var decoder = new FakeDecoder { Generator = path =>
+        {
+            if (path == "editor-selection")
+            {
+                decoding.Set();
+                if (!release.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException();
+            }
+            return FakeDecoder.CreateTone(.25f, 4096);
+        }};
+        using var rig = new Rig(decoder);
+        if (sending)
+        {
+            Assert.True(rig.Session.AttachOutput().Accepted);
+            Assert.True(rig.Session.EnableExtras(true).Accepted);
+        }
+        Assert.True((sending ? rig.Session.PlayClip("unrelated") : rig.Session.PreviewClip("unrelated")).Accepted);
+        var before = rig.Session.Status();
+        var pending = rig.Session.PreviewClipAsync("editor-selection", cancellation.Token);
+        try
+        {
+            Assert.True(decoding.Wait(TimeSpan.FromSeconds(3)));
+            cancellation.Cancel();
+            Assert.Equal(before.Clip, rig.Session.Status().Clip);
+            Assert.Equal(before.Switches, rig.Session.Status().Switches);
+        }
+        finally { release.Set(); }
+
+        Assert.Equal("clip-start-cancelled", (await pending).Rejection);
+        Assert.Equal(before.Clip, rig.Session.Status().Clip);
+        Assert.Equal(before.Switches, rig.Session.Status().Switches);
+        Assert.False(rig.Session.Status().ClipLoading);
+        var audible = sending ? rig.Outputs.Last().Pump(32) : rig.Monitors.Last().Pump(32);
+        Assert.All(audible, sample => Assert.Equal(.25f, sample, 4));
+    }
+
+    [Fact]
+    public async Task Already_canceled_preview_does_not_decode_or_change_the_active_sound()
+    {
+        var decoder = new FakeDecoder();
+        using var rig = new Rig(decoder);
+        Assert.True(rig.Session.PreviewClip("unrelated").Accepted);
+        var before = rig.Session.Status();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        var result = await rig.Session.PreviewClipAsync("editor-selection", cancellation.Token);
+
+        Assert.Equal("clip-start-cancelled", result.Rejection);
+        Assert.Equal(1, decoder.Calls);
+        Assert.Equal(before.Clip, rig.Session.Status().Clip);
+        Assert.False(rig.Session.Status().ClipLoading);
+    }
+
+    [Fact]
+    public async Task Canceling_preview_queued_for_decode_releases_loading_without_canceling_a_later_play()
+    {
+        using var decoding = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        using var cancellation = new CancellationTokenSource();
+        var decoder = new FakeDecoder { Generator = path =>
+        {
+            if (path == "blocked")
+            {
+                decoding.Set();
+                if (!release.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException();
+            }
+            return FakeDecoder.CreateTone(.25f, 4096);
+        }};
+        using var rig = new Rig(decoder);
+        Assert.True(rig.Session.AttachOutput().Accepted);
+        Assert.True(rig.Session.EnableExtras(true).Accepted);
+        Assert.True(rig.Session.PreviewClip("unrelated").Accepted);
+        var active = rig.Session.Status().Clip;
+        var first = rig.Session.PlayClipAsync("blocked");
+        Task<CommandResult>? editor = null;
+        Task<CommandResult>? latest = null;
+        try
+        {
+            Assert.True(decoding.Wait(TimeSpan.FromSeconds(3)));
+            editor = rig.Session.PreviewClipAsync("editor-selection", cancellation.Token);
+            cancellation.Cancel();
+            Assert.Same(editor, await Task.WhenAny(editor, Task.Delay(1500)));
+            Assert.Equal("clip-start-cancelled", (await editor).Rejection);
+            Assert.Equal(active, rig.Session.Status().Clip);
+            Assert.False(rig.Session.Status().ClipLoading);
+            Assert.Equal(2, decoder.Calls);
+            latest = rig.Session.PlayClipAsync("latest");
+            Assert.True(rig.Session.Status().ClipLoading);
+        }
+        finally { release.Set(); }
+
+        Assert.Equal("clip-start-cancelled", (await first).Rejection);
+        Assert.True((await latest!).Accepted);
+        Assert.Equal("latest", rig.Session.Status().Clip?.ClipId);
+        Assert.False(rig.Session.Status().ClipLoading);
+        Assert.Equal(3, decoder.Calls);
+    }
+
     [Fact]
     public void Emergency_mute_discards_old_material_before_the_next_send()
     {

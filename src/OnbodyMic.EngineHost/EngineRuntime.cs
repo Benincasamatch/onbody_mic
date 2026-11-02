@@ -13,6 +13,17 @@ internal sealed class EngineRuntime : IAsyncDisposable
 {
     private sealed record ManagedEntry(ClipItem Item, string ManagedPath);
     private sealed record LibraryView(LibraryData Data, Dictionary<string, ManagedEntry> Entries);
+    private sealed record AudioEditSource(string Path, string? ClipId, string OriginalPath);
+    private sealed class AudioEditRequest(AudioEditSource source, CancellationToken stopping, string? previewId)
+    {
+        public AudioEditSource Source { get; } = source;
+        public string? PreviewId { get; } = previewId;
+        public CancellationTokenSource Cancellation { get; } = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+        public TaskCompletionSource SourceReleased { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task<object?>? Work { get; set; }
+        public string? TemporaryDirectory { get; set; }
+        public Exception? CleanupError { get; set; }
+    }
     private sealed class LibrarySlot(string root)
     {
         public string Root { get; } = root;
@@ -28,6 +39,10 @@ internal sealed class EngineRuntime : IAsyncDisposable
     private readonly CancellationTokenSource _lifetime = new();
     private readonly OwnedClipDecoder _decoder;
     private readonly ManagedClipSampleStore _samples;
+    private readonly AudioFileEditor _audioEditor = new();
+    private readonly SemaphoreSlim _audioEditorSlot = new(1, 1);
+    private readonly HashSet<AudioEditRequest> _audioEditRequests = [];
+    private readonly ConcurrentDictionary<string, string> _audioPreviewPaths = new(StringComparer.Ordinal);
     private readonly object _deviceGate = new();
     private readonly object _workerGate = new();
     private readonly object _shutdownGate = new();
@@ -56,6 +71,12 @@ internal sealed class EngineRuntime : IAsyncDisposable
     private long _playIntent;
     private string? _pendingClipId;
     private bool _pendingClipIsSend;
+    private AudioEditRequest? _audioPreview;
+    private string? _audioPreviewId;
+    private AudioEditSource? _audioPreviewSource;
+    private AudioFileInspection? _audioInspection;
+    private AudioEditSource? _audioInspectionSource;
+    private long _audioInspectionIntent;
     private bool _initialized;
     private int _stopping;
 
@@ -89,7 +110,7 @@ internal sealed class EngineRuntime : IAsyncDisposable
                     else
                     {
                         // Preparing playback is synchronous and ordered. Only its decode/completion leaves this lane.
-                        if (operation == "play") PublishState();
+                        if (operation is "play" or "preview_audio") PublishState();
                         Track(CompleteRequestAsync(operation, pending, completion));
                     }
                 }
@@ -154,6 +175,7 @@ internal sealed class EngineRuntime : IAsyncDisposable
                 try { config = CommandArguments.Object<PresetConfigData>(args, "config").ToDomain(); }
                 catch
                 {
+                    CancelAudioPreview(stopPlaying: false);
                     _pendingClipId = null;
                     _playIntent++;
                     RequireAccepted(session.TeardownForAbort());
@@ -192,12 +214,15 @@ internal sealed class EngineRuntime : IAsyncDisposable
             case "play":
                 return BeginPlayback(CommandArguments.String(args, "clipId"), CommandArguments.String(args, "mode"));
             case "stop":
+                var canceledPreviewPreparation = CancelAudioPreview(stopPlaying: false);
                 _pendingClipId = null;
                 _playIntent++;
-                RequireAccepted(session.StopClip());
+                var stoppedClip = session.StopClip();
+                RequireAccepted(canceledPreviewPreparation ? CommandResult.Ok : stoppedClip);
                 result = true;
                 break;
             case "mute":
+                CancelAudioPreview(stopPlaying: false);
                 _pendingClipId = null;
                 _playIntent++;
                 RequireAccepted(session.EmergencyMute());
@@ -208,6 +233,7 @@ internal sealed class EngineRuntime : IAsyncDisposable
                 result = true;
                 break;
             case "attach_output":
+                CancelAudioPreview(stopPlaying: false);
                 _pendingClipId = null;
                 _playIntent++;
                 RequireAccepted(session.TeardownForAbort());
@@ -215,6 +241,15 @@ internal sealed class EngineRuntime : IAsyncDisposable
                 ClearIssue(PresetRoute.VirtualOutput);
                 result = true;
                 break;
+            case "inspect_audio":
+                return InspectAudioAsync(args);
+            case "preview_audio":
+                return BeginAudioPreview(args);
+            case "import_trimmed_audio":
+                return ImportTrimmedAudioAsync(args);
+            case "release_audio_preview":
+                CancelAudioEditor();
+                return AwaitAudioEditsAsync(_audioEditRequests.ToArray());
             case "prepare_folder_import":
                 var folderPaths = CommandArguments.Required(args, "paths");
                 if (folderPaths.ValueKind != JsonValueKind.Array ||
@@ -301,6 +336,8 @@ internal sealed class EngineRuntime : IAsyncDisposable
                     RequireGroup(library, deleteGroupId);
                     return library.DeleteGroup(deleteGroupId);
                 });
+            case "group_delete_contents":
+                return DeleteGroupContentsAsync(CommandArguments.String(args, "groupId"));
             case "clip_path":
                 var pathId = CommandArguments.String(args, "clipId");
                 return QueueLibraryWork(library =>
@@ -315,8 +352,7 @@ internal sealed class EngineRuntime : IAsyncDisposable
                 break;
             case "exit":
                 StopAudioPaths();
-                result = true;
-                break;
+                return AwaitAudioEditsAsync(_audioEditRequests.ToArray());
             default:
                 throw HostCommandException.Invalid($"unknown operation: {operation}");
         }
@@ -340,7 +376,7 @@ internal sealed class EngineRuntime : IAsyncDisposable
             SampleStore = _samples,
             ClipResolver = id =>
             {
-                var resolution = ResolveClip(id);
+                var resolution = ResolveSessionClip(id);
                 // AudioSession's raw-path API is intentionally unavailable at the IPC boundary, including deletion races.
                 if (!resolution.Known) throw new FileNotFoundException($"unknown managed clip: {id}");
                 return resolution;
@@ -422,6 +458,7 @@ internal sealed class EngineRuntime : IAsyncDisposable
         if (_librarySlot is null || !string.Equals(_librarySlot.Root, root, StringComparison.OrdinalIgnoreCase)
             || (_librarySlot.Ready.Task.IsCompletedSuccessfully && _librarySlot.Library is null))
         {
+            CancelAudioEditor(stopPlaying: false);
             _pendingClipId = null;
             _playIntent++;
             _ = _session!.StopClip();
@@ -577,6 +614,13 @@ internal sealed class EngineRuntime : IAsyncDisposable
         return new ClipResolution(true, File.Exists(entry.ManagedPath), entry.ManagedPath, entry.Item.Gain);
     }
 
+    private ClipResolution ResolveSessionClip(string id)
+    {
+        if (_audioPreviewPaths.TryGetValue(id, out var path))
+            return new ClipResolution(true, File.Exists(path), path, 1f);
+        return ResolveClip(id);
+    }
+
     private Task<object?> QueueLibraryWork(Func<ClipLibrary, object?> operation, LibrarySlot? target = null)
     {
         var slot = target ?? _librarySlot ?? throw HostCommandException.Rejected("library-not-initialized");
@@ -650,12 +694,17 @@ internal sealed class EngineRuntime : IAsyncDisposable
             _samples.Remove(id);
             RequireAccepted(_dispatcher!.Unbind(HotkeyAction.PlayClip, id));
             ReapplyHotkeys();
-            await QueueLibraryWork(library =>
+            var audioSourcesReleased = CancelAudioSources([id]);
+            await EnqueueLibraryWork(async () =>
             {
+                await slot.Ready.Task.ConfigureAwait(false);
+                _lifetime.Token.ThrowIfCancellationRequested();
+                await audioSourcesReleased.ConfigureAwait(false);
+                var library = slot.Library ?? throw HostCommandException.Rejected($"library unavailable: {slot.Error}");
                 RequireClip(library, id);
                 if (!library.Delete(id)) throw HostCommandException.Rejected($"unknown-clip:{id}");
                 return true;
-            }, slot).ConfigureAwait(false);
+            }).ConfigureAwait(false);
             return await OnControlsAsync<object?>(() =>
             {
                 _deletingClips.TryRemove(id, out _);
@@ -678,6 +727,332 @@ internal sealed class EngineRuntime : IAsyncDisposable
         }
     }
 
+    private async Task<object?> DeleteGroupContentsAsync(string groupId)
+    {
+        var slot = _librarySlot ?? throw HostCommandException.Rejected("library-not-initialized");
+        var marked = new List<string>();
+        try
+        {
+            var deleted = (string[])(await EnqueueLibraryWork(async () =>
+            {
+                await slot.Ready.Task.ConfigureAwait(false);
+                _lifetime.Token.ThrowIfCancellationRequested();
+                var library = slot.Library ?? throw HostCommandException.Rejected($"library unavailable: {slot.Error}");
+                RequireGroup(library, groupId);
+                var ids = library.Search(groupId: groupId).Select(clip => clip.ClipId).ToArray();
+                var audioSourcesReleased = await OnControlsAsync(() =>
+                {
+                    var status = _session!.Status();
+                    foreach (var id in ids)
+                    {
+                        if (!_deletingClips.TryAdd(id, 0)) throw HostCommandException.Rejected("clip deletion is already in progress");
+                        marked.Add(id);
+                        if (_pendingClipId == id || status.Clip?.ClipId == id)
+                        {
+                            _pendingClipId = null;
+                            _playIntent++;
+                            _ = _session.StopClip();
+                        }
+                        _samples.Remove(id);
+                        RequireAccepted(_dispatcher!.Unbind(HotkeyAction.PlayClip, id));
+                    }
+                    ReapplyHotkeys();
+                    return CancelAudioSources(ids);
+                }).ConfigureAwait(false);
+                await audioSourcesReleased.ConfigureAwait(false);
+                return library.DeleteGroupAndClips(groupId);
+            }).ConfigureAwait(false))!;
+            await OnControlsAsync(() =>
+            {
+                foreach (var id in deleted) _settings!.ClipHotkeys.Remove(id);
+                return true;
+            }).ConfigureAwait(false);
+            return new { deletedClipIds = deleted };
+        }
+        finally
+        {
+            await OnControlsAsync(() =>
+            {
+                foreach (var id in marked) _deletingClips.TryRemove(id, out _);
+                if (_libraryView is { } view)
+                    _samples.SetAssets(view.Entries.ToDictionary(pair => pair.Key, pair => pair.Value.ManagedPath, StringComparer.Ordinal), reset: false);
+                ReapplyHotkeys();
+                return true;
+            }, allowStopping: true).ConfigureAwait(false);
+        }
+    }
+
+    private AudioEditSource ReadAudioSource(JsonElement args)
+    {
+        var path = CommandArguments.OptionalString(args, "path");
+        var clipId = CommandArguments.OptionalString(args, "clipId");
+        if ((path is null) == (clipId is null))
+            throw HostCommandException.Invalid("exactly one of path or clipId is required");
+        if (path is not null)
+        {
+            if (string.IsNullOrWhiteSpace(path)) throw HostCommandException.Invalid("path must not be empty");
+            var fullPath = Path.GetFullPath(path);
+            return new AudioEditSource(fullPath, null, fullPath);
+        }
+        if (string.IsNullOrWhiteSpace(clipId)) throw HostCommandException.Invalid("clipId must not be empty");
+        var view = _libraryView ?? throw HostCommandException.Rejected("library-change-in-progress");
+        if (_deletingClips.ContainsKey(clipId) || !view.Entries.TryGetValue(clipId, out var entry))
+            throw HostCommandException.Rejected($"unknown-clip:{clipId}");
+        return new AudioEditSource(entry.ManagedPath, clipId,
+            entry.Item.Origin?.OriginalPath ?? entry.Item.OriginalImportPath ?? entry.ManagedPath);
+    }
+
+    private static (string Version, double StartMs, double EndMs) ReadAudioRange(JsonElement args)
+    {
+        var version = CommandArguments.String(args, "sourceVersion");
+        var start = CommandArguments.Required(args, "startMs");
+        var end = CommandArguments.Required(args, "endMs");
+        if (start.ValueKind != JsonValueKind.Number || !start.TryGetDouble(out var startMs)
+            || end.ValueKind != JsonValueKind.Number || !end.TryGetDouble(out var endMs))
+            throw HostCommandException.Invalid("startMs and endMs must be finite numbers");
+        AudioFileEditor.ValidateRange(startMs, endMs);
+        return (version, startMs, endMs);
+    }
+
+    private Task<object?> InspectAudioAsync(JsonElement args)
+    {
+        var source = ReadAudioSource(args);
+        var intent = ++_audioInspectionIntent;
+        return StartAudioEdit(source, async request =>
+        {
+            var inspection = await RunAudioSourceWorkAsync(request, token => _audioEditor.Inspect(source.Path, token)).ConfigureAwait(false);
+            return await OnControlsAsync<object?>(() =>
+            {
+                request.Cancellation.Token.ThrowIfCancellationRequested();
+                if (intent == _audioInspectionIntent)
+                {
+                    _audioInspection = inspection;
+                    _audioInspectionSource = source;
+                }
+                return AudioInspectionData.FromPlatform(inspection);
+            }).ConfigureAwait(false);
+        });
+    }
+
+    private Task<object?> BeginAudioPreview(JsonElement args)
+    {
+        var source = ReadAudioSource(args);
+        var (version, startMs, endMs) = ReadAudioRange(args);
+        var status = _session!.Status();
+        if (status.EmergencyLatched) throw HostCommandException.Rejected("emergency-latched");
+        if (string.IsNullOrWhiteSpace(status.Devices?.MonitorDeviceId))
+            throw HostCommandException.Rejected("monitor-device-unconfigured");
+        CancelAudioPreview();
+        var id = "editor-preview:" + Guid.NewGuid().ToString("N");
+        var intent = ++_playIntent;
+        _pendingClipId = id;
+        _pendingClipIsSend = false;
+        _audioPreviewId = id;
+        _audioPreviewSource = source;
+        var inspection = _audioInspection;
+        return StartAudioEdit(source, async request =>
+        {
+            var exported = await ExportAudioSelectionAsync(request, version, startMs, endMs, inspection).ConfigureAwait(false);
+            var playback = await OnControlsAsync(() =>
+            {
+                request.Cancellation.Token.ThrowIfCancellationRequested();
+                if (_playIntent != intent || !ReferenceEquals(_audioPreview, request))
+                    throw HostCommandException.Rejected("clip-start-cancelled");
+                if (!_audioPreviewPaths.TryAdd(id, exported)) throw new InvalidOperationException("duplicate editor preview identity");
+                var pending = _session!.PreviewClipAsync(id, request.Cancellation.Token);
+                PublishState();
+                return pending;
+            }).ConfigureAwait(false);
+            RequireAccepted(await playback.ConfigureAwait(false));
+            return true;
+        }, id);
+    }
+
+    private Task<object?> ImportTrimmedAudioAsync(JsonElement args)
+    {
+        var source = ReadAudioSource(args);
+        var (version, startMs, endMs) = ReadAudioRange(args);
+        var displayName = CommandArguments.String(args, "displayName");
+        var allowDuplicate = CommandArguments.OptionalBoolean(args, "allowDuplicate");
+        var groupId = CommandArguments.OptionalString(args, "groupId");
+        if (endMs > int.MaxValue) throw HostCommandException.Invalid("selection times exceed the provenance millisecond range");
+        var originStart = checked((int)Math.Round(startMs, MidpointRounding.AwayFromZero));
+        var originEnd = checked((int)Math.Round(endMs, MidpointRounding.AwayFromZero));
+        if (originStart == originEnd)
+        {
+            originStart = checked((int)Math.Floor(startMs));
+            originEnd = checked(originStart + 1);
+        }
+        var origin = new ClipOrigin("trim", source.ClipId, source.OriginalPath, originStart, originEnd);
+        var slot = _librarySlot ?? throw HostCommandException.Rejected("library-not-initialized");
+        var inspection = _audioInspection;
+        return StartAudioEdit(source, async request =>
+        {
+            var exported = await ExportAudioSelectionAsync(request, version, startMs, endMs, inspection).ConfigureAwait(false);
+            // Enqueue on the control lane so importing cannot race other library mutations.
+            var importing = await OnControlsAsync(() =>
+            {
+                request.Cancellation.Token.ThrowIfCancellationRequested();
+                if (!ReferenceEquals(_librarySlot, slot)) throw HostCommandException.Rejected("library-change-in-progress");
+                return QueueLibraryWork(library =>
+                {
+                    request.Cancellation.Token.ThrowIfCancellationRequested();
+                    if (source.ClipId is { } parentId) RequireClip(library, parentId);
+                    if (groupId is not null) RequireGroup(library, groupId);
+                    var imported = library.ImportSelection(exported, origin, displayName, allowDuplicate, groupId);
+                    return new ImportResultData(imported.Outcome.ToString(), ClipItemData.FromDomain(imported.Item, library),
+                        imported.ExistingDuplicate is { } duplicate ? ClipItemData.FromDomain(duplicate, library) : null);
+                }, slot);
+            }).ConfigureAwait(false);
+            return await importing.ConfigureAwait(false);
+        });
+    }
+
+    private Task<object?> StartAudioEdit(AudioEditSource source, Func<AudioEditRequest, Task<object?>> operation, string? previewId = null)
+    {
+        var request = new AudioEditRequest(source, _lifetime.Token, previewId);
+        _audioEditRequests.Add(request);
+        if (previewId is not null) _audioPreview = request;
+        var work = RunAudioEditAsync(request, operation);
+        request.Work = work;
+        return work;
+    }
+
+    private async Task<object?> RunAudioEditAsync(AudioEditRequest request, Func<AudioEditRequest, Task<object?>> operation)
+    {
+        try { return await operation(request).ConfigureAwait(false); }
+        catch (InvalidDataException ex) { throw HostCommandException.Rejected(ex.Message); }
+        finally
+        {
+            request.SourceReleased.TrySetResult();
+            if (request.PreviewId is { } id) _audioPreviewPaths.TryRemove(id, out _);
+            try
+            {
+                if (request.TemporaryDirectory is { } directory)
+                {
+                    try { Directory.Delete(directory, recursive: true); }
+                    catch (DirectoryNotFoundException) { /* A failed create or prior cleanup left no directory. */ }
+                }
+            }
+            catch (Exception ex)
+            {
+                request.CleanupError = ex;
+                throw;
+            }
+            finally
+            {
+                await OnControlsAsync(() =>
+                {
+                    _audioEditRequests.Remove(request);
+                    if (ReferenceEquals(_audioPreview, request)) _audioPreview = null;
+                    if (request.PreviewId is { } previewId)
+                    {
+                        if (_pendingClipId == previewId) _pendingClipId = null;
+                        if (_audioPreviewId == previewId && _session?.Status().Clip?.ClipId != previewId)
+                        {
+                            _audioPreviewId = null;
+                            _audioPreviewSource = null;
+                        }
+                    }
+                    request.Cancellation.Dispose();
+                    return true;
+                }, allowStopping: true).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async Task<T> RunAudioSourceWorkAsync<T>(AudioEditRequest request, Func<CancellationToken, T> operation)
+    {
+        return await Task.Run(async () =>
+        {
+            var acquired = false;
+            try
+            {
+                await _audioEditorSlot.WaitAsync(request.Cancellation.Token).ConfigureAwait(false);
+                acquired = true;
+                request.Cancellation.Token.ThrowIfCancellationRequested();
+                return operation(request.Cancellation.Token);
+            }
+            finally
+            {
+                if (acquired) _audioEditorSlot.Release();
+                request.SourceReleased.TrySetResult();
+            }
+        }).ConfigureAwait(false);
+    }
+
+    private Task<string> ExportAudioSelectionAsync(AudioEditRequest request, string version, double startMs, double endMs,
+        AudioFileInspection? inspection) => RunAudioSourceWorkAsync(request, token =>
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "OnbodyMic-audio-editor-" + Guid.NewGuid().ToString("N"));
+        request.TemporaryDirectory = directory;
+        Directory.CreateDirectory(directory);
+        var exported = Path.Combine(directory, "selection.wav");
+        _audioEditor.ExportSelection(request.Source.Path, version, startMs, endMs, exported, token, inspection);
+        token.ThrowIfCancellationRequested();
+        return exported;
+    });
+
+    private bool CancelAudioPreview(bool stopPlaying = true)
+    {
+        var canceledPreparation = _audioPreview is not null;
+        var id = _audioPreviewId;
+        _audioPreview?.Cancellation.Cancel();
+        _audioPreview = null;
+        if (id is not null && _pendingClipId == id)
+        {
+            _pendingClipId = null;
+            _playIntent++;
+        }
+        // A canceled preparation is guarded by its token. Stop only the editor's
+        // currently playing clip, never the unrelated sound it was preparing over.
+        if (stopPlaying && id is not null && _session?.Status().Clip is { Mode: ClipPlaybackMode.Preview } clip && clip.ClipId == id)
+            _ = _session!.StopClip();
+        _audioPreviewId = null;
+        _audioPreviewSource = null;
+        return canceledPreparation;
+    }
+
+    private void CancelAudioEditor(bool stopPlaying = true)
+    {
+        CancelAudioPreview(stopPlaying);
+        foreach (var request in _audioEditRequests) request.Cancellation.Cancel();
+        _audioInspectionIntent++;
+        _audioInspection = null;
+        _audioInspectionSource = null;
+    }
+
+    private Task CancelAudioSources(IReadOnlyCollection<string> clipIds)
+    {
+        if (_audioPreviewSource?.ClipId is { } previewSourceId && clipIds.Contains(previewSourceId, StringComparer.Ordinal))
+            CancelAudioPreview();
+        if (_audioInspectionSource?.ClipId is { } inspectionSourceId && clipIds.Contains(inspectionSourceId, StringComparer.Ordinal))
+        {
+            _audioInspectionIntent++;
+            _audioInspection = null;
+            _audioInspectionSource = null;
+        }
+        List<Task>? releasing = null;
+        foreach (var request in _audioEditRequests)
+        {
+            if (request.Source.ClipId is not { } sourceId || !clipIds.Contains(sourceId, StringComparer.Ordinal)) continue;
+            request.Cancellation.Cancel();
+            (releasing ??= []).Add(request.SourceReleased.Task);
+        }
+        return releasing is null ? Task.CompletedTask : Task.WhenAll(releasing);
+    }
+
+    private static async Task<object?> AwaitAudioEditsAsync(AudioEditRequest[] requests)
+    {
+        try { await Task.WhenAll(requests.Select(request => request.Work ?? Task.CompletedTask)).ConfigureAwait(false); }
+        catch (Exception) { /* Each editor request reports its own source/decode/import failure; closing still joins all of them. */ }
+        List<Exception>? cleanupErrors = null;
+        foreach (var request in requests)
+            if (request.CleanupError is { } error) (cleanupErrors ??= []).Add(error);
+        if (cleanupErrors is not null) throw new AggregateException("audio editor temporary cleanup failed", cleanupErrors);
+        return true;
+    }
+
     private Task<object?> BeginPlayback(string id, string mode)
     {
         if (mode is not ("preview" or "send")) throw HostCommandException.Invalid("mode must be preview or send");
@@ -687,6 +1062,7 @@ internal sealed class EngineRuntime : IAsyncDisposable
         if (!resolution.Known) throw HostCommandException.Rejected($"unknown-clip:{id}");
         if (!resolution.Available) throw HostCommandException.Rejected($"clip-unavailable:{id}");
         if (mode == "send") RequireOutputReady(_session!.Status());
+        CancelAudioPreview();
         var playback = mode == "preview" ? _session!.PreviewClipAsync(id) : _session!.PlayClipAsync(id);
         var intent = ++_playIntent;
         _pendingClipId = id;
@@ -756,6 +1132,7 @@ internal sealed class EngineRuntime : IAsyncDisposable
 
     private PresetApplyResult ApplyConfiguration(PresetConfig config)
     {
+        CancelAudioPreview(stopPlaying: false);
         _pendingClipId = null;
         _playIntent++;
         var result = _session!.ApplyPreset(config);
@@ -785,6 +1162,7 @@ internal sealed class EngineRuntime : IAsyncDisposable
 
     private void ClearPreset()
     {
+        CancelAudioPreview(stopPlaying: false);
         _pendingClipId = null;
         _playIntent++;
         RequireAccepted(_session!.ClearConfiguration());
@@ -941,6 +1319,9 @@ internal sealed class EngineRuntime : IAsyncDisposable
                         }
                     }
                 }
+                if (action == HotkeyAction.EmergencyMute
+                    || (!_dispatcher.Suspended && action is HotkeyAction.PlayClip or HotkeyAction.StopClip))
+                    CancelAudioPreview(stopPlaying: action == HotkeyAction.PlayClip);
                 var previous = _dispatcher.LastPlayback;
                 _hotkeys!.Deliver(trigger);
                 if (!ReferenceEquals(previous, _dispatcher.LastPlayback))
@@ -1095,6 +1476,7 @@ internal sealed class EngineRuntime : IAsyncDisposable
 
     private void StopAudioPaths()
     {
+        CancelAudioEditor(stopPlaying: false);
         _pendingClipId = null;
         _playIntent++;
         _dispatcher?.Suspend();
@@ -1154,6 +1536,7 @@ internal sealed class EngineRuntime : IAsyncDisposable
             library.Dispose();
         }
         _decoder.Dispose();
+        _audioEditorSlot.Dispose();
         _controls.Dispose();
         _lifetime.Dispose();
         if (silenceFailure is not null) throw silenceFailure;

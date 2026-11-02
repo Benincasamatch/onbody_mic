@@ -227,7 +227,8 @@ public sealed class AudioSession : IDisposable
 
     public CommandResult PreviewClip(string path) => PreviewClipAsync(path).GetAwaiter().GetResult();
 
-    public Task<CommandResult> PreviewClipAsync(string path) => StartClipAsync(path, send: false);
+    public Task<CommandResult> PreviewClipAsync(string path, CancellationToken cancellationToken = default) =>
+        StartClipAsync(path, send: false, cancellationToken: cancellationToken);
 
     public CommandResult StopClip() => _commands.Submit("stop-clip", () =>
     {
@@ -492,11 +493,12 @@ public sealed class AudioSession : IDisposable
         return CommandResult.Ok;
     }
 
-    private Task<CommandResult> StartClipAsync(string clipId, bool send)
+    private Task<CommandResult> StartClipAsync(string clipId, bool send, CancellationToken cancellationToken = default)
     {
         long requestId = 0;
         var prepared = _commands.Submit("prepare-clip", () =>
         {
+            if (cancellationToken.IsCancellationRequested) return CommandResult.Reject("clip-start-cancelled");
             var check = CheckClipStart(send);
             if (!check.Accepted) return check;
             requestId = ++_playRequestId;
@@ -508,17 +510,23 @@ public sealed class AudioSession : IDisposable
 
         return Task.Run(async () =>
         {
-            await _decodeSlot.WaitAsync().ConfigureAwait(false);
+            var acquired = false;
             try
             {
+                await _decodeSlot.WaitAsync(cancellationToken).ConfigureAwait(false);
+                acquired = true;
                 // Bound decoder memory use and skip superseded requests before I/O.
-                var current = _commands.Submit("check-clip-request", () => requestId == _playRequestId
+                var current = _commands.Submit("check-clip-request", () => requestId == _playRequestId && !cancellationToken.IsCancellationRequested
                     ? CommandResult.Ok : CommandResult.Reject("clip-start-cancelled"));
-                return current.Accepted ? DecodeAndStartClip(clipId, send, requestId) : current;
+                return current.Accepted ? DecodeAndStartClip(clipId, send, requestId, cancellationToken) : current;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return CommandResult.Reject("clip-start-cancelled");
             }
             finally
             {
-                _decodeSlot.Release();
+                if (acquired) _decodeSlot.Release();
                 _commands.Submit("clip-load-finished", () =>
                 {
                     if (requestId == _playRequestId) _clipLoading = false;
@@ -528,13 +536,15 @@ public sealed class AudioSession : IDisposable
         });
     }
 
-    private CommandResult DecodeAndStartClip(string clipId, bool send, long requestId)
+    private CommandResult DecodeAndStartClip(string clipId, bool send, long requestId, CancellationToken cancellationToken)
     {
         // Decode on the caller's worker, never the session command thread.
         // Mute, stop, status and preset changes remain available during I/O.
+        if (cancellationToken.IsCancellationRequested) return CommandResult.Reject("clip-start-cancelled");
         ClipResolution resolution;
         try { resolution = _options.ClipResolver?.Invoke(clipId) ?? ClipResolution.Unknown; }
         catch (Exception ex) { return CommandResult.Reject($"decode-failed: {ex.Message}"); }
+        if (cancellationToken.IsCancellationRequested) return CommandResult.Reject("clip-start-cancelled");
         if (resolution.Known && !resolution.Available)
         {
             return CommandResult.Reject($"clip-unavailable:{clipId}");
@@ -554,10 +564,11 @@ public sealed class AudioSession : IDisposable
             }
             catch (Exception ex)
             {
-                return CommandResult.Reject($"decode-failed: {ex.Message}");
+                return CommandResult.Reject(cancellationToken.IsCancellationRequested ? "clip-start-cancelled" : $"decode-failed: {ex.Message}");
             }
 
             samples = decoded.Samples;
+            if (cancellationToken.IsCancellationRequested) return CommandResult.Reject("clip-start-cancelled");
             if (resolution.Known)
             {
                 // only stable library ids enter the cache; ad-hoc raw paths
@@ -568,7 +579,7 @@ public sealed class AudioSession : IDisposable
 
         return _commands.Submit("start-decoded-clip", () =>
         {
-            if (requestId != _playRequestId) return CommandResult.Reject("clip-start-cancelled");
+            if (requestId != _playRequestId || cancellationToken.IsCancellationRequested) return CommandResult.Reject("clip-start-cancelled");
             var check = CheckClipStart(send);
             if (!check.Accepted) return check;
             return StartDecodedClip(clipId, send, samples, resolution.Gain);

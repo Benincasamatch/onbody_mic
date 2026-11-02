@@ -13,7 +13,7 @@ using OnbodyMic.Persistence;
 /// </summary>
 public sealed class ClipLibrary : IDisposable
 {
-    private const int SchemaVersion = 1;
+    private const int SchemaVersion = 2;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -68,15 +68,25 @@ public sealed class ClipLibrary : IDisposable
             throw new ClipLibraryLoadException($"index json invalid: {ex.Message}");
         }
 
-        if (document.SchemaVersion != SchemaVersion)
+        if (document.SchemaVersion is not (1 or SchemaVersion))
         {
             throw new ClipLibraryLoadException($"unsupported index schemaVersion: {document.SchemaVersion}");
+        }
+
+        if (document.Items is null || document.Groups is null)
+        {
+            throw new ClipLibraryLoadException("index items and groups must be arrays");
         }
 
         var items = new List<ClipItem>(document.Items.Count);
         var seenIds = new HashSet<string>();
         foreach (var dto in document.Items)
         {
+            if (dto is null)
+            {
+                throw new ClipLibraryLoadException("index contains a null item");
+            }
+
             if (string.IsNullOrWhiteSpace(dto.ClipId) || !seenIds.Add(dto.ClipId))
             {
                 throw new ClipLibraryLoadException($"duplicate or empty clipId: '{dto.ClipId}'");
@@ -112,6 +122,16 @@ public sealed class ClipLibrary : IDisposable
                 throw new ClipLibraryLoadException($"item {dto.ClipId}: invalid import time");
             }
 
+            if (dto.Origin is not null)
+            {
+                if (document.SchemaVersion == 1)
+                    throw new ClipLibraryLoadException($"item {dto.ClipId}: origin requires schemaVersion 2");
+                if (ValidateOrigin(dto.Origin, dto.ClipId) is { } reason)
+                    throw new ClipLibraryLoadException($"item {dto.ClipId}: {reason}");
+                if (dto.Format != "wav" || dto.OriginalImportPath != dto.Origin.OriginalPath)
+                    throw new ClipLibraryLoadException($"item {dto.ClipId}: inconsistent trimmed origin");
+            }
+
             items.Add(new ClipItem(
                 dto.ClipId,
                 dto.DisplayName,
@@ -122,13 +142,19 @@ public sealed class ClipLibrary : IDisposable
                 dto.Favorite,
                 dto.GroupId,
                 dto.Gain,
-                dto.ImportUnixMs));
+                dto.ImportUnixMs,
+                dto.Origin));
         }
 
         var groups = new List<ClipGroup>(document.Groups.Count);
         var seenGroups = new HashSet<string>();
         foreach (var dto in document.Groups)
         {
+            if (dto is null)
+            {
+                throw new ClipLibraryLoadException("index contains a null group");
+            }
+
             if (string.IsNullOrWhiteSpace(dto.GroupId) || !seenGroups.Add(dto.GroupId))
             {
                 throw new ClipLibraryLoadException($"duplicate or empty groupId: '{dto.GroupId}'");
@@ -247,90 +273,115 @@ public sealed class ClipLibrary : IDisposable
     }
 
     public ImportResult Import(string sourcePath, string? displayName = null, bool allowDuplicate = false, string? groupId = null)
+        => ImportCore(sourcePath, displayName, allowDuplicate, groupId, origin: null);
+
+    /// <summary>Imports an independently owned exported WAV, retaining its source provenance rather than the temporary export path.</summary>
+    public ImportResult ImportSelection(string exportedWavPath, ClipOrigin origin, string displayName, bool allowDuplicate = false, string? groupId = null)
+    {
+        if (origin is null) throw new ClipImportException("selection origin is required");
+        if (ValidateOrigin(origin) is { } reason) throw new ClipImportException(reason);
+        if (string.IsNullOrWhiteSpace(displayName)) throw new ClipImportException("selection display name must not be empty");
+        origin = origin with { OriginalPath = Path.GetFullPath(origin.OriginalPath) };
+        return ImportCore(exportedWavPath, displayName, allowDuplicate, groupId, origin);
+    }
+
+    private ImportResult ImportCore(string sourcePath, string? displayName, bool allowDuplicate, string? groupId, ClipOrigin? origin)
     {
         var fullPath = Path.GetFullPath(sourcePath);
         if (!File.Exists(fullPath))
-        {
             throw new ClipImportException($"file not found: {sourcePath}");
-        }
 
         var extension = Path.GetExtension(fullPath).ToLowerInvariant();
         if (extension is not (".wav" or ".mp3"))
-        {
             throw new ClipImportException($"unsupported format: {extension}（首批支持 wav/mp3）");
-        }
-
-        var fileBytes = new FileInfo(fullPath).Length;
-        if (fileBytes > _limits.MaxFileBytes)
-        {
+        if (origin is not null && extension != ".wav")
+            throw new ClipImportException("trimmed selection must be exported as WAV");
+        if (new FileInfo(fullPath).Length > _limits.MaxFileBytes)
             throw new ClipImportException($"file exceeds {_limits.MaxFileBytes} bytes");
-        }
 
-        DecodedClip decoded;
+        var assetsDirectory = Path.Combine(_root, "assets");
+        Directory.CreateDirectory(assetsDirectory);
+        var stagedPath = Path.Combine(assetsDirectory, $".import-{Guid.NewGuid():N}{extension}");
+        string? cleanupPath = stagedPath;
+        FileStream? reservation = null;
         try
         {
-            decoded = _decoder.Decode(fullPath);
-        }
-        catch (Exception ex)
-        {
-            throw new ClipImportException($"decode failed: {ex.Message}");
-        }
+            CopyVerified(fullPath, stagedPath);
+            if (new FileInfo(stagedPath).Length > _limits.MaxFileBytes)
+                throw new ClipImportException($"file exceeds {_limits.MaxFileBytes} bytes");
 
-        var duration = TimeSpan.FromSeconds((double)decoded.Samples.Length / EngineFormat.Rate);
-        if (duration.TotalSeconds > _limits.MaxDurationSeconds)
-        {
-            throw new ClipImportException($"clip exceeds {_limits.MaxDurationSeconds}s bound（实测 {duration.TotalSeconds:F1}s）");
-        }
-
-        string hash;
-        using (var stream = File.OpenRead(fullPath))
-        {
-            hash = Convert.ToHexString(SHA256.HashData(stream));
-        }
-
-        lock (_gate)
-        {
-            var duplicate = _items.FirstOrDefault(i => i.Format == extension.TrimStart('.') && ContentHashMatches(i, hash));
-            if (duplicate is not null && !allowDuplicate)
-            {
-                return ImportResult.FromDuplicate(duplicate);
-            }
-
-            if (groupId is not null && _groups.All(g => g.GroupId != groupId))
-                throw new ClipImportException($"group not found: {groupId}");
-
-            var clipId = NewClipId(_items);
-            var assetPath = $"assets/{clipId}{extension}";
-            var assetAbsolute = ResolveManagedPath(assetPath);
-            Directory.CreateDirectory(Path.Combine(_root, "assets"));
-            CopyVerified(fullPath, assetAbsolute);
-
-            var item = new ClipItem(
-                clipId,
-                displayName is { Length: > 0 } ? displayName.Trim() : Path.GetFileNameWithoutExtension(fullPath),
-                assetPath,
-                fullPath,
-                (int)duration.TotalMilliseconds,
-                extension.TrimStart('.'),
-                Favorite: false,
-                GroupId: groupId,
-                Gain: 1f,
-                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-
+            DecodedClip decoded;
             try
             {
-                _items.Add(item);
-                SaveIndex();
+                decoded = _decoder.Decode(stagedPath);
             }
-            catch
+            catch (Exception ex)
             {
-                _items.Remove(item);
-                TryDeleteFile(assetAbsolute);
-                throw;
+                throw new ClipImportException($"decode failed: {ex.Message}");
             }
 
-            Changed?.Invoke();
-            return new ImportResult(ImportOutcome.Imported, item, null);
+            var duration = TimeSpan.FromSeconds((double)decoded.Samples.Length / EngineFormat.Rate);
+            if (duration.TotalSeconds > _limits.MaxDurationSeconds)
+                throw new ClipImportException($"clip exceeds {_limits.MaxDurationSeconds}s bound（实测 {duration.TotalSeconds:F1}s）");
+
+            // Reserve the staged copy against new readers/writers while allowing our rename and rollback deletion.
+            reservation = new FileStream(stagedPath, FileMode.Open, FileAccess.Read, FileShare.Delete);
+            var hash = Convert.ToHexString(SHA256.HashData(reservation));
+            lock (_gate)
+            {
+                var duplicate = _items.FirstOrDefault(i => i.Format == extension.TrimStart('.') && ContentHashMatches(i, hash));
+                if (duplicate is not null && !allowDuplicate)
+                    return ImportResult.FromDuplicate(duplicate);
+
+                if (groupId is not null && _groups.All(g => g.GroupId != groupId))
+                    throw new ClipImportException($"group not found: {groupId}");
+
+                var clipId = NewClipId(_items);
+                var assetPath = $"assets/{clipId}{extension}";
+                var assetAbsolute = ResolveManagedPath(assetPath);
+                File.Move(stagedPath, assetAbsolute);
+                cleanupPath = assetAbsolute;
+                var item = new ClipItem(
+                    clipId,
+                    string.IsNullOrWhiteSpace(displayName) ? Path.GetFileNameWithoutExtension(fullPath) : displayName.Trim(),
+                    assetPath,
+                    origin?.OriginalPath ?? fullPath,
+                    (int)duration.TotalMilliseconds,
+                    extension.TrimStart('.'),
+                    Favorite: false,
+                    GroupId: groupId,
+                    Gain: 1f,
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    origin);
+
+                try
+                {
+                    _items.Add(item);
+                    SaveIndex();
+                }
+                catch
+                {
+                    _items.Remove(item);
+                    throw;
+                }
+
+                cleanupPath = null;
+                reservation.Dispose();
+                reservation = null;
+                Changed?.Invoke();
+                return new ImportResult(ImportOutcome.Imported, item, null);
+            }
+        }
+        finally
+        {
+            try
+            {
+                if (cleanupPath is not null) TryDeleteFile(cleanupPath);
+            }
+            finally
+            {
+                reservation?.Dispose();
+            }
         }
     }
 
@@ -386,7 +437,6 @@ public sealed class ClipLibrary : IDisposable
         lock (_gate)
         {
             var originalGroups = _groups;
-            _groups = new List<ClipGroup>(_groups);
             var groupIds = new string?[entries.Count];
             var files = new List<FolderImportFile>();
             var roots = new List<string>();
@@ -409,6 +459,7 @@ public sealed class ClipLibrary : IDisposable
                     if (group is null)
                     {
                         group = new ClipGroup(NewGroupId(_groups), name, parentId);
+                        if (ReferenceEquals(_groups, originalGroups)) _groups = new List<ClipGroup>(_groups);
                         InsertGroup(group, naturalSiblingOrder: true);
                     }
                     groupIds[i] = group.GroupId;
@@ -427,7 +478,7 @@ public sealed class ClipLibrary : IDisposable
         }
     }
 
-    private sealed record FolderEntry(string Path, int ParentIndex, bool IsDirectory);
+    private readonly record struct FolderEntry(string Path, int ParentIndex, bool IsDirectory);
 
     private static void AddFolderEntry(string path, int parentIndex, List<FolderEntry> entries, HashSet<string> seenPaths)
     {
@@ -580,34 +631,27 @@ public sealed class ClipLibrary : IDisposable
         }
     }
 
-    public bool Delete(string clipId)
+    /// <summary>Deletes a group subtree and its managed copies in one index transaction. Original source files and independent derived clips remain untouched.</summary>
+    public string[] DeleteGroupAndClips(string groupId)
     {
-        ClipItem? removed;
         lock (_gate)
         {
-            removed = _items.FirstOrDefault(i => i.ClipId == clipId);
-            if (removed is null)
-            {
-                return false;
-            }
-
-            var originalIndex = _items.IndexOf(removed);
-            _items.Remove(removed);
-            try
-            {
-                SaveIndex();
-            }
-            catch
-            {
-                _items.Insert(originalIndex, removed);
-                throw;
-            }
+            if (_groups.All(g => g.GroupId != groupId)) return [];
+            var descendants = GroupSubtree(groupId);
+            var removed = _items.Where(i => i.GroupId is not null && descendants.Contains(i.GroupId)).ToArray();
+            return CommitDeletion(removed, descendants);
         }
+    }
 
-        // The user's original file is never touched; only the managed copy goes away.
-        TryDeleteFile(AssetAbsolutePath(removed));
-        Changed?.Invoke();
-        return true;
+    public bool Delete(string clipId)
+    {
+        lock (_gate)
+        {
+            var removed = _items.FirstOrDefault(i => i.ClipId == clipId);
+            if (removed is null) return false;
+            CommitDeletion([removed], deletedGroups: null);
+            return true;
+        }
     }
 
     private bool MutateItem(string clipId, Func<ClipItem, ClipItem> mutate)
@@ -643,6 +687,90 @@ public sealed class ClipLibrary : IDisposable
         }
     }
 
+    private string[] CommitDeletion(ClipItem[] removed, HashSet<string>? deletedGroups)
+    {
+        var deletedIds = removed.Select(i => i.ClipId).ToArray();
+        var removedIds = deletedIds.ToHashSet(StringComparer.Ordinal);
+        var originalItems = _items;
+        var originalGroups = _groups;
+        var remainingItems = _items.Where(i => !removedIds.Contains(i.ClipId)).ToList();
+        var remainingGroups = deletedGroups is null ? _groups : _groups.Where(g => !deletedGroups.Contains(g.GroupId)).ToList();
+        var pathComparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        var retainedAssets = remainingItems.Select(AssetAbsolutePath).ToHashSet(pathComparer);
+        var stagedPaths = new HashSet<string>(pathComparer);
+        var staged = new List<StagedAsset>(removed.Length);
+        var stagingDirectory = Path.Combine(_root, $".delete-{Guid.NewGuid():N}");
+        try
+        {
+            try
+            {
+                foreach (var item in removed)
+                {
+                    var assetPath = AssetAbsolutePath(item);
+                    if (retainedAssets.Contains(assetPath) || !stagedPaths.Add(assetPath)) continue;
+
+                    FileStream reservation;
+                    try
+                    {
+                        // Delete sharing permits our moves/deletes, but blocks incompatible playback and new readers/writers.
+                        reservation = new FileStream(assetPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Delete);
+                    }
+                    catch (FileNotFoundException) { continue; }
+                    catch (DirectoryNotFoundException) { continue; }
+
+                    try
+                    {
+                        Directory.CreateDirectory(stagingDirectory);
+                        var stagedPath = Path.Combine(stagingDirectory, $"{staged.Count}{Path.GetExtension(assetPath)}");
+                        File.Move(assetPath, stagedPath);
+                        staged.Add(new StagedAsset(assetPath, stagedPath, reservation));
+                    }
+                    catch
+                    {
+                        reservation.Dispose();
+                        throw;
+                    }
+                }
+
+                _items = remainingItems;
+                _groups = remainingGroups;
+                SaveIndex();
+            }
+            catch (Exception failure)
+            {
+                _items = originalItems;
+                _groups = originalGroups;
+                List<Exception>? rollbackFailures = null;
+                for (var i = staged.Count - 1; i >= 0; i--)
+                {
+                    try { File.Move(staged[i].StagedPath, staged[i].OriginalPath); }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        (rollbackFailures ??= []).Add(ex);
+                    }
+                }
+                if (rollbackFailures is not null)
+                {
+                    rollbackFailures.Insert(0, failure);
+                    throw new AggregateException($"asset rollback failed; recoverable copies remain in '{stagingDirectory}'", rollbackFailures);
+                }
+                throw;
+            }
+
+            foreach (var asset in staged) File.Delete(asset.StagedPath);
+        }
+        finally
+        {
+            foreach (var asset in staged) asset.Reservation.Dispose();
+            TryDeleteEmptyDirectory(stagingDirectory);
+        }
+
+        Changed?.Invoke();
+        return deletedIds;
+    }
+
+    private readonly record struct StagedAsset(string OriginalPath, string StagedPath, FileStream Reservation);
+
     private void SaveIndex()
     {
         var document = new LibraryDocument
@@ -660,6 +788,7 @@ public sealed class ClipLibrary : IDisposable
                 GroupId = i.GroupId,
                 Gain = i.Gain,
                 ImportUnixMs = i.ImportUnixMs,
+                Origin = i.Origin,
             })],
             Groups = [.. _groups.Select(g => new ClipGroupDto { GroupId = g.GroupId, Name = g.Name, ParentGroupId = g.ParentGroupId })],
         };
@@ -685,27 +814,11 @@ public sealed class ClipLibrary : IDisposable
 
     private static void CopyVerified(string source, string destination)
     {
-        var temp = destination + ".tmp";
-        try
-        {
-            File.Copy(source, temp, overwrite: true);
-            if (new FileInfo(temp).Length != new FileInfo(source).Length)
-            {
-                throw new IOException("asset copy verify failed");
-            }
-
-            if (File.Exists(destination))
-            {
-                File.Delete(temp);
-                throw new IOException("asset already exists");
-            }
-
-            File.Move(temp, destination);
-        }
-        finally
-        {
-            TryDeleteFile(temp);
-        }
+        using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read);
+        using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        input.CopyTo(output);
+        if (output.Length != input.Length) throw new IOException("asset copy verify failed");
+        output.Flush(flushToDisk: true);
     }
 
     private static void TryDeleteFile(string path)
@@ -719,11 +832,41 @@ public sealed class ClipLibrary : IDisposable
         }
         catch (IOException)
         {
-            // a locked asset file must not break the index update
+            // Only uncommitted copies use best-effort cleanup; persisted deletions reserve and stage their assets.
         }
         catch (UnauthorizedAccessException)
         {
         }
+    }
+
+    private static void TryDeleteEmptyDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path)) Directory.Delete(path);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    private static string? ValidateOrigin(ClipOrigin origin, string? clipId = null)
+    {
+        if (origin.Kind != "trim") return "unsupported origin kind";
+        if (origin.ParentClipId is not null && (string.IsNullOrWhiteSpace(origin.ParentClipId) || origin.ParentClipId == clipId))
+            return "invalid origin parentClipId";
+        if (origin.StartMs < 0 || origin.EndMs <= origin.StartMs || (long)origin.EndMs - origin.StartMs > 60000)
+            return "origin selection must be within 0–60 seconds";
+        try
+        {
+            if (string.IsNullOrWhiteSpace(origin.OriginalPath) || !Path.IsPathFullyQualified(origin.OriginalPath))
+                return "origin originalPath must be fully qualified";
+            _ = Path.GetFullPath(origin.OriginalPath);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return "origin originalPath is invalid";
+        }
+        return null;
     }
 
     private static string NewClipId(IEnumerable<ClipItem> items)
@@ -789,6 +932,8 @@ public sealed class ClipLibrary : IDisposable
         public float Gain { get; set; } = 1f;
 
         public long ImportUnixMs { get; set; }
+
+        public ClipOrigin? Origin { get; set; }
     }
 
     private sealed class ClipGroupDto
