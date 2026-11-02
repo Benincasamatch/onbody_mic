@@ -2,6 +2,32 @@
 
 所有显著变更按版本记录。格式参考 Keep a Changelog；本项目版本号独立于文档基线版本（文档 v1.x 见 docs/04）。
 
+## [0.3.0] - 2026-11-02
+
+应用内版本管理、更新提醒与 NSIS 安装程序。
+
+### 新增
+
+- 新增“关于随声麦与更新”面板：显示语义化版本、Git 短提交、提交时间、UTC 构建时间和工作树脏标记；构建信息由 `build.rs` 在编译时写入，缺失 Git 元数据时明确显示未知。
+- 新增应用内更新检查：最多每 12 小时读取一次 GitHub Releases 的公开版本信息，按语义化版本比较（含预发布顺序），发现正式新版本时在主界面显示横幅；页脚版本号提供手动检查和更新说明入口。
+- 更新说明直接读取随包 `CHANGELOG.md`；检测到新版本时显示远端发布说明。自动检查失败保持静默，手动检查显示网络/HTTP 原因。
+- 下载按钮一键调用系统默认浏览器打开 Release 资产：优先 `*setup*.exe` 安装程序，其次便携 ZIP，最后发布页；不自动下载、不静默安装、不在运行时替换文件。
+- `build/build-desktop.ps1 -Bundle`（别名 `-Installer`）除便携目录/ZIP 外，将 NSIS 安装程序复制为 `dist/OnbodyMic-<版本>-desktop-installer-x64.exe`。安装程序按当前用户安装，内置简体中文/英文界面。
+- 新增 `build/set-version.ps1` 同步全部清单版本，`build/tag-release.ps1` 校验版本、CHANGELOG 和标签唯一性后创建 annotated tag；规范见 [版本、提交与发布规范](docs/11-versioning-and-release.md)。
+
+### 验证
+
+- 218 项 .NET Release 测试、11 项 Rust 测试和 7 项 Node 版本比较测试全部通过；修复了文件夹导入测试在 Windows 上未规范化路径分隔符导致的误报。
+- `build-desktop.ps1 -Bundle` 实际生成 35.08 MiB 的 NSIS 安装程序和便携目录/ZIP；安装程序与便携包均包含 `OnbodyMic.EngineHost.exe`。
+- 真实 Tauri 窗口验证：页脚显示 `v0.3.0`，关于面板读取到提交、提交时间、构建时间和 6 个 CHANGELOG 版本；自动检查真实 GitHub API 成功并显示“当前已是最新版本”。
+- 通过 CDP 注入模拟 Release v0.4.0 验证更新可用路径：主界面出现新版本横幅，关于面板显示远端说明；点击“下载安装程序”实际打开系统浏览器到 `setup.exe` 资产地址。未自动下载或安装。
+- 前端 `tsc --noEmit`、Vite 生产构建和 Rust release 构建无错误。
+
+### 已知限制
+
+- 安装程序未代码签名，Windows SmartScreen 可能提示未知发布者；GitHub 更新检查受匿名 API 速率限制和网络可达性影响。
+- 只提示正式版本，不提供增量更新、后台下载或自动安装；便携用户需自行解压覆盖。
+
 ## [0.2.0] - 2026-11-02
 
 本地原生桌面交付；以 GitHub Release v0.2.0 发布便携包。

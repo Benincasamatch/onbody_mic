@@ -1,11 +1,11 @@
 # Onbody Mic 模块契约与数据基线
 
-版本：文档基线 v1.0；补充软件 0.2.0 的已实现边界。原始工程设计日期：2026-10-24。
-状态：§0 记录 0.2.0 当前实现；其余目录、接口和 JSON 为 v1.0 工程设计示意，运行结果见 07 验证记录，不以示意代替现有代码。
+版本：文档基线 v1.0；补充软件 0.3.0 的已实现边界。原始工程设计日期：2026-10-24。
+状态：§0 记录 0.3.0 当前实现；其余目录、接口和 JSON 为 v1.0 工程设计示意，运行结果见 07 验证记录，不以示意代替现有代码。
 
 本文把 `docs/01-product-requirements.md` 与 `docs/02-architecture-and-safety.md` 收敛为一套可执行的模块边界。它不是 API 锁定书，也不是对 Windows、KOOK、虚拟设备或任何延迟指标的实测声明。
 
-## 0. 软件 0.2.0 的实际模块与数据契约
+## 0. 软件 0.3.0 的实际模块与数据契约
 
 以下是当前实现，不是建议目录；后续章节中的 v1.0 示意结构保留为产品安全基线。
 
@@ -15,6 +15,7 @@
 | 配置与预设 | Rust `models.rs`、`store.rs`、`runtime.rs` | Rust 独占写入 `settings.json` 和 `presets/`，原子保存与备份，保留既有 schema v1 与未知字段；未知版本明确拒绝 |
 | 音频与系统适配 | `src/OnbodyMic.EngineHost/` 及现有 Audio/Application/Media/Platform.Windows | C# 后端拥有设备、素材库、缓存、实时音频、应用捕获与全局热键，不运行旧桌面/CLI 界面 |
 | 进程通信 | Rust `broker.rs`、C# `Protocol.cs`、`Contracts.cs` | 随包后端的标准输入/输出 NDJSON；请求含 `id`、`op`、`args`，响应含成功值或错误；事件独立传递状态、库、热键与通知，不开放网络端口 |
+| 版本与更新检查 | `desktop/src-tauri/build.rs`、`version.rs`、`desktop/src/version.ts`、`update.tsx` | 构建时写入 Git/构建时间戳；`app_info` 返回构建信息、解析后的 CHANGELOG 和更新端点；前端按语义化版本比较 GitHub Releases，发现正式新版本时提醒并打开下载链接，不自动下载或安装 |
 
 DTO 的当前字段以 `models.rs` / `Contracts.cs` 为准，不把 §4 中的 JSON 示意当成磁盘格式。音频帧不经 IPC 传入网页；设备句柄和缓冲仍归 C# 音频层。所有按钮与热键通过现有有序会话控制通道，较慢的解码/导入工作不阻塞该通道；迟到结果按播放意图和来源/会话代数拒绝。
 

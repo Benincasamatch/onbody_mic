@@ -1,0 +1,193 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
+import { Button, Dialog, Icon, IconButton } from './components';
+import { errorMessage, nativeRuntime } from './bridge';
+import type { AppInfo, BuildInfo, ReleaseNote, UpdateCheck } from './version';
+import { fetchLatestRelease, formatStamp, toUpdateCheck } from './version';
+
+const CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000;
+const CHECKED_AT_KEY = 'onbodymic.update.checkedAt';
+const DISMISSED_KEY = 'onbodymic.update.dismissed';
+
+function readStorage(key: string): string | null {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function writeStorage(key: string, value: string) {
+  try { localStorage.setItem(key, value); } catch { /* private or restricted webview: remember for this session only */ }
+}
+
+function readDismissed(): string[] {
+  try {
+    const parsed = JSON.parse(readStorage(DISMISSED_KEY) ?? '[]');
+    return Array.isArray(parsed) ? parsed.filter(value => typeof value === 'string').slice(0, 20) : [];
+  } catch { return []; }
+}
+
+export async function openExternal(url: string) {
+  if (nativeRuntime) { await openUrl(url); return; }
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+export function useUpdater(currentVersion: string | undefined) {
+  const [info, setInfo] = useState<AppInfo | null>(null);
+  const [infoError, setInfoError] = useState('');
+  const [update, setUpdate] = useState<UpdateCheck | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [error, setError] = useState('');
+  const [checkedAt, setCheckedAt] = useState<number | null>(() => {
+    const value = Number(readStorage(CHECKED_AT_KEY));
+    return Number.isFinite(value) && value > 0 ? value : null;
+  });
+  const [dismissed, setDismissed] = useState<string[]>(readDismissed);
+  const running = useRef(false);
+
+  useEffect(() => {
+    if (!nativeRuntime) return;
+    let stopped = false;
+    void invoke<AppInfo>('app_info')
+      .then(value => { if (!stopped) setInfo(value); })
+      .catch(failure => { if (!stopped) setInfoError(errorMessage(failure)); });
+    return () => { stopped = true; };
+  }, []);
+
+  const checkNow = useCallback(async (manual = false) => {
+    if (!info || running.current) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      if (manual) setError('当前处于离线状态，无法检查更新。');
+      return;
+    }
+    running.current = true;
+    setChecking(true);
+    setError('');
+    try {
+      const latest = await fetchLatestRelease(info.updateApi);
+      const result = toUpdateCheck(latest, info.build.version || currentVersion || '0.0.0');
+      setUpdate(result);
+      setCheckedAt(result.checkedAt);
+      writeStorage(CHECKED_AT_KEY, String(result.checkedAt));
+    } catch (failure) {
+      if (manual) setError(errorMessage(failure));
+    } finally {
+      running.current = false;
+      setChecking(false);
+    }
+  }, [info, currentVersion]);
+
+  useEffect(() => {
+    if (!info || running.current) return;
+    if (checkedAt && Date.now() - checkedAt < CHECK_INTERVAL_MS) return;
+    void checkNow(false);
+  }, [info, checkedAt, checkNow]);
+
+  function dismiss() {
+    if (!update) return;
+    const next = [...new Set([...dismissed, update.latest.tag_name])].slice(-20);
+    setDismissed(next);
+    writeStorage(DISMISSED_KEY, JSON.stringify(next));
+  }
+
+  const banner = update?.available && !dismissed.includes(update.latest.tag_name) ? update : null;
+  return { info, infoError, update, banner, checking, error, checkedAt, checkNow, dismiss };
+}
+
+export function UpdateBanner({ update, currentVersion, onOpen, onDismiss, onError }: { update: UpdateCheck; currentVersion: string; onOpen(): void; onDismiss(): void; onError(message: string): void }) {
+  return <div className="update-banner" role="status">
+    <span className="update-banner-icon"><Icon name="download" size={18} /></span>
+    <div><strong>发现新版本 v{update.latestVersion}</strong><p>当前 v{currentVersion}。下载安装程序会覆盖程序文件，配置、预设和音效保留。</p></div>
+    <Button variant="primary" onClick={() => { void openExternal(update.downloadUrl).catch(failure => onError(errorMessage(failure))); }}><Icon name="download" size={14} />{update.downloadLabel}</Button>
+    <Button onClick={onOpen}>更新说明</Button>
+    <IconButton icon="close" label="稍后提醒此版本" onClick={onDismiss} />
+  </div>;
+}
+
+function inline(text: string): ReactNode[] {
+  return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).filter(Boolean).map((part, index) => {
+    if (part.startsWith('**') && part.endsWith('**')) return <strong key={index}>{part.slice(2, -2)}</strong>;
+    if (part.startsWith('`') && part.endsWith('`')) return <code key={index}>{part.slice(1, -1)}</code>;
+    return part;
+  });
+}
+
+function MarkdownNotes({ text }: { text: string }) {
+  const blocks: ReactNode[] = [];
+  let items: string[] = [];
+  function flush() {
+    if (items.length) { blocks.push(<ul key={`list-${blocks.length}`}>{items.map((item, index) => <li key={index}>{inline(item)}</li>)}</ul>); items = []; }
+  }
+  for (const raw of text.replace(/\r\n/g, '\n').split('\n')) {
+    const line = raw.trimEnd();
+    if (/^#{2,4}\s/.test(line)) { flush(); blocks.push(<h4 key={`heading-${blocks.length}`}>{inline(line.replace(/^#{2,4}\s+/, ''))}</h4>); continue; }
+    if (/^[-*]\s+/.test(line)) { items.push(line.replace(/^[-*]\s+/, '')); continue; }
+    if (!line.trim()) { flush(); continue; }
+    flush();
+    blocks.push(<p key={`paragraph-${blocks.length}`}>{inline(line)}</p>);
+  }
+  flush();
+  return <div className="release-notes">{blocks}</div>;
+}
+
+function LocalNotes({ releases }: { releases: ReleaseNote[] }) {
+  if (!releases.length) return <p className="muted">没有可读取的本地更新说明。</p>;
+  return <div className="release-history">{releases.slice(0, 8).map(release => <section key={`${release.version}:${release.date ?? ''}`}>
+    <h4>v{release.version}{release.date ? <small>{release.date}</small> : null}</h4>
+    {release.sections.map(section => <div key={section.title}>
+      <h5>{section.title}</h5>
+      <ul>{section.items.map((item, index) => <li key={index}>{inline(item)}</li>)}</ul>
+    </div>)}
+  </section>)}</div>;
+}
+
+function BuildFacts({ build }: { build: BuildInfo }) {
+  return <dl className="build-facts">
+    <div><dt>版本</dt><dd>v{build.version}{build.dirty ? <span className="dirty-chip">开发构建</span> : null}</dd></div>
+    <div><dt>提交</dt><dd title={build.commit}>{build.commitShort === 'unknown' ? '未知' : build.commitShort}</dd></div>
+    <div><dt>提交时间</dt><dd>{formatStamp(build.commitTime)}</dd></div>
+    <div><dt>构建时间</dt><dd>{formatStamp(build.buildTime)}</dd></div>
+  </dl>;
+}
+
+export function AboutDialog({ info, infoError, update, checking, error, checkedAt, checkNow, close, onError }: {
+  info: AppInfo | null;
+  infoError: string;
+  update: UpdateCheck | null;
+  checking: boolean;
+  error: string;
+  checkedAt: number | null;
+  checkNow(): void;
+  close(): void;
+  onError(message: string): void;
+}) {
+  const build = info?.build;
+  const currentVersion = build?.version ?? '0.0.0';
+  const latestNotes = update?.latest.body?.trim();
+  return <Dialog title="关于随声麦与更新" close={close}>
+    <div className="about-heading">
+      <span className="about-symbol"><Icon name="audio" size={30} /></span>
+      <div><strong>随声麦 · Onbody Mic</strong><p>游戏语音音频面板 · 本地运行，不上传音频</p></div>
+    </div>
+    {build ? <BuildFacts build={build} /> : <p className={infoError ? 'inline-error' : 'muted'} role={infoError ? 'alert' : undefined}>{infoError || '正在读取构建信息…'}</p>}
+
+    <section className={`update-card ${update?.available ? 'available' : ''}`}>
+      <div className="update-card-heading">
+        <Icon name={update?.available ? 'download' : 'clock'} size={18} />
+        <div>
+          <strong>{checking ? '正在检查更新…' : update?.available ? `新版本 v${update.latestVersion} 可用` : checkedAt ? '当前已是最新版本' : '尚未检查更新'}</strong>
+          <p>{update?.available ? `当前 v${currentVersion}，发布于 ${formatStamp(update.latest.published_at)}。` : checkedAt ? `上次检查：${new Date(checkedAt).toLocaleString('zh-CN', { hour12: false })}。` : '更新检查只读取 GitHub Releases 的公开版本信息。'}</p>
+        </div>
+        <Button disabled={checking || !info} onClick={checkNow}><Icon name="refresh" size={14} />{checking ? '检查中…' : '检查更新'}</Button>
+      </div>
+      {error && <p className="inline-error" role="alert">{error}</p>}
+      {update?.available && <div className="inline-actions">
+        <Button variant="primary" onClick={() => { void openExternal(update.downloadUrl).catch(failure => onError(errorMessage(failure))); }}><Icon name="download" size={14} />{update.downloadLabel}</Button>
+        <Button onClick={() => { void openExternal(update.releaseUrl).catch(failure => onError(errorMessage(failure))); }}><Icon name="link" size={13} />打开发布页面</Button>
+      </div>}
+    </section>
+
+    <h3>{update?.available ? `v${update.latestVersion} 更新说明` : '当前版本更新说明'}</h3>
+    {update?.available && latestNotes ? <MarkdownNotes text={latestNotes} /> : <LocalNotes releases={info?.releases ?? []} />}
+    {info && <p className="about-links"><button type="button" onClick={() => { void openExternal(info.repository).catch(failure => onError(errorMessage(failure))); }}>项目仓库</button><span aria-hidden="true">·</span><button type="button" onClick={() => { void openExternal(info.releasesUrl).catch(failure => onError(errorMessage(failure))); }}>全部发布</button></p>}
+  </Dialog>;
+}

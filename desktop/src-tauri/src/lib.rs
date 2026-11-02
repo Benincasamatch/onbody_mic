@@ -2,6 +2,7 @@ mod broker;
 mod models;
 mod runtime;
 mod store;
+mod version;
 
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
@@ -18,6 +19,11 @@ async fn desktop_command(op: String, args: serde_json::Value, state: tauri::Stat
     state.command(&op, args).await
 }
 
+#[tauri::command]
+fn app_info() -> version::AppInfo {
+    version::app_info()
+}
+
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -30,7 +36,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![desktop_state, desktop_command])
+        .invoke_handler(tauri::generate_handler![desktop_state, desktop_command, app_info])
         .setup(|app| {
             let runtime = Arc::new(DesktopRuntime::new(app.handle().clone())?);
             app.manage(runtime.clone());

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Button, ClipGrid, GroupNavigation, Icon, IconButton, ImportButton, PlaybackStrip, RouteCard, Select, WindowHeader } from './components';
 import { AppPickerDialog, ClipDialog, DeviceDialog, DiagnosticsDialog, GroupsDialog, HotkeysDialog, PendingDialogs, PresetsDialog } from './dialogs';
+import { AboutDialog, UpdateBanner, useUpdater } from './update';
 import { useDesktop } from './context';
 import { errorMessage, nativeRuntime } from './bridge';
 import type { ClipItem, PanelKind, PresetConfig, RouteId } from './types';
@@ -11,6 +12,9 @@ const routes: readonly RouteId[] = ['mic', 'app', 'extras', 'monitor'];
 
 export default function App() {
   const desktop = useDesktop();
+  const updater = useUpdater(desktop.state?.version);
+  const version = updater.info?.build.version ?? desktop.state?.version ?? '…';
+  const [aboutOpen, setAboutOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mixerVisible, setMixerVisible] = useState(true);
   const [panel, setPanel] = useState<PanelKind | 'app' | 'groups' | null>(null);
@@ -54,10 +58,11 @@ export default function App() {
       {(desktop.error || desktop.state?.engineError) && <div className="connection-error" role="alert"><Icon name="info" size={19} /><div><strong>音频后端不可用</strong><p>{desktop.error ?? desktop.state?.engineError}</p></div><Button onClick={() => { void desktop.perform('restart_engine').catch(() => undefined); }} disabled={!nativeRuntime}>重启后端</Button></div>}
       {desktop.state?.settingsError && <div className="connection-error" role="alert"><Icon name="info" size={17} /><p>配置文件无法读取，当前使用未激活状态；原文件未自动修复。{errorMessage(desktop.state.settingsError)}</p></div>}
       {engine && !desktop.state?.activePreset && <div className="setup-banner"><Icon name="settings" size={18} /><span>先选择麦克风、虚拟输出和监听耳机，保存第一个预设。</span><Button variant="primary" onClick={() => { setPresetEditing(null); setPanel('devices'); }}>首次配置</Button></div>}
+      {updater.banner && <UpdateBanner update={updater.banner} currentVersion={version} onOpen={() => setAboutOpen(true)} onDismiss={updater.dismiss} onError={message => desktop.notify(message)} />}
       <div className="library-toolbar"><div className="library-search-row"><label className="search-field"><Icon name="search" size={16} /><input data-search-input aria-label="搜索音效" placeholder="搜索音效名称…" value={desktop.query} onChange={event => desktop.setQuery(event.target.value)} /><kbd>Ctrl K</kbd></label><ImportButton /></div><div className="library-meta"><span>{desktop.filteredClips.length} 条音效{desktop.importing ? ' · 正在导入' : ''}</span><div className="inline-actions"><label className="sort-picker">排序<Select aria-label="音效排序" value={desktop.state?.settings.ui.clipSort ?? 'name'} disabled={!desktop.state} onChange={value => { if (desktop.state) void desktop.perform('settings_save', { settings: { ...desktop.state.settings, ui: { ...desktop.state.settings.ui, clipSort: value } } }).catch(() => undefined); }} options={[{ value: 'name', label: '名称' }, { value: 'importTime', label: '导入时间' }, { value: 'libraryOrder', label: '文件夹 / 导入顺序' }]} /></label><IconButton icon="refresh" label="刷新音效与状态" onClick={() => { void desktop.refresh(); }} /></div></div></div>
       <ClipGrid edit={clip => { setClipEditing(clip); setPanel('clip'); }} /><PlaybackStrip />
     </main>{mixerVisible && <aside className="soundboard-mixer" aria-label="发送与监听"><div className="mixer-heading"><span className="eyebrow">MIXER</span><h2>发送与监听</h2></div><div className="route-stack">{routes.map(route => <RouteCard key={route} route={route} pickApp={() => setPanel('app')} />)}</div><Button variant="ghost" className="wide-button" onClick={() => openPanel('devices')}><Icon name="settings" size={14} />设备与监听设置<Icon name="link" size={12} /></Button></aside>}</div>
-    <footer className="status-footer"><span className={`footer-state ${status?.emergencyLatched || status?.outputLost || !engine ? 'warning' : ''}`}><span className="status-dot" />{statusText}</span>{desktop.dirty && <span className="dirty-note">预设未保存</span>}<span className="footer-note">状态不代表 KOOK 或远端已收到</span><button type="button" onClick={() => openPanel('diagnostics')}><Icon name="activity" size={13} />诊断</button></footer>
+    <footer className="status-footer"><span className={`footer-state ${status?.emergencyLatched || status?.outputLost || !engine ? 'warning' : ''}`}><span className="status-dot" />{statusText}</span>{desktop.dirty && <span className="dirty-note">预设未保存</span>}<span className="footer-note">状态不代表 KOOK 或远端已收到</span><button type="button" className="version-button" onClick={() => setAboutOpen(true)} title={`关于随声麦 v${version}`}><Icon name="info" size={13} />v{version}{updater.banner ? <span className="update-dot" aria-label="有新版本" /> : null}</button><button type="button" onClick={() => openPanel('diagnostics')}><Icon name="activity" size={13} />诊断</button></footer>
     {panel === 'devices' && <DeviceDialog close={() => setPanel(null)} existing={presetEditing === null ? null : presetEditing} />}
     {panel === 'presets' && <PresetsDialog close={() => setPanel(null)} create={() => { setPresetEditing(null); setPanel('devices'); }} edit={config => { setPresetEditing(config); setPanel('devices'); }} />}
     {panel === 'app' && <AppPickerDialog close={() => setPanel(null)} />}
@@ -65,6 +70,7 @@ export default function App() {
     {panel === 'hotkeys' && <HotkeysDialog close={() => setPanel(null)} />}
     {panel === 'diagnostics' && <DiagnosticsDialog close={() => setPanel(null)} />}
     {panel === 'clip' && clipEditing && <ClipDialog key={clipEditing.clipId} clip={clipEditing} close={() => setPanel(null)} hotkeys={() => setPanel('hotkeys')} />}
+    {aboutOpen && <AboutDialog info={updater.info} infoError={updater.infoError} update={updater.update} checking={updater.checking} error={updater.error} checkedAt={updater.checkedAt} checkNow={() => { void updater.checkNow(true); }} close={() => setAboutOpen(false)} onError={message => desktop.notify(message)} />}
     <PendingDialogs />{desktop.toast && <div className="toast" role="status">{desktop.toast}</div>}
   </div>;
 }
