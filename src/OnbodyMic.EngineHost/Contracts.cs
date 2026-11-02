@@ -106,11 +106,16 @@ internal sealed record ClipItemData(
 
 internal sealed record ImportResultData(string Outcome, ClipItemData Item, ClipItemData? ExistingDuplicate);
 internal sealed record AudioDeviceData(string Id, string FriendlyName, string DataFlow, string State, bool IsDefault);
-internal sealed record AppInstanceData(uint ProcessId, string ExecutablePath, string DisplayName);
+internal sealed record AppInstanceData(uint ProcessId, string ExecutablePath, string DisplayName,
+    string Category, string StartTimeTicks);
 internal sealed record HotkeyBindingData(string Action, string? TargetId, string Gesture);
 internal sealed record SettingsIssueData(string Section, string Key, string Reason);
 internal sealed record HotkeyData(HotkeyBindingData[] Hotkeys, SettingsIssueData[] HotkeyIssues, string[] HotkeyActions);
 internal sealed record LibraryData(ClipItemData[] Clips, ClipGroup[] Groups, string? LibraryError, string LibraryRoot);
+internal sealed record FolderImportData(FolderImportFile[] Files, string[] RootGroupIds)
+{
+    public static FolderImportData FromDomain(FolderImportPlan plan) => new(plan.Files, plan.RootGroupIds);
+}
 
 internal sealed record SessionStatusData(
     SessionPhase Phase, SessionSwitches Switches, bool EmergencyLatched, bool OutputLost,

@@ -13,12 +13,17 @@ public sealed record ClipItem(
     float Gain,
     long ImportUnixMs);
 
-public sealed record ClipGroup(string GroupId, string Name);
+public sealed record ClipGroup(string GroupId, string Name, string? ParentGroupId = null);
+
+public sealed record FolderImportFile(string Path, string? GroupId);
+
+public sealed record FolderImportPlan(FolderImportFile[] Files, string[] RootGroupIds);
 
 public enum ClipSortOrder
 {
     Name,
     ImportTime,
+    LibraryOrder,
 }
 
 /// <summary>Import limits; the duration bound matches the decoder's full-predecode contract (docs/01 §5.3).</summary>

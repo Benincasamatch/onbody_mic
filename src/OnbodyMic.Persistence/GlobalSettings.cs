@@ -17,7 +17,7 @@ public sealed class UiPreferencesData
     /// <summary>True once the user has seen the close-to-tray explanation (docs/01 §6 tray baseline).</summary>
     public bool CloseToTrayAcknowledged { get; set; }
 
-    /// <summary>"name" | "importTime"; anything else loads as the default with an issue.</summary>
+    /// <summary>"name" | "importTime" | "libraryOrder"; anything else loads as the default with an issue.</summary>
     public string ClipSort { get; set; } = "name";
 }
 
@@ -139,7 +139,7 @@ public sealed class GlobalSettingsStore
             AddBinding(bindings, seenGestures, issues, "presetHotkeys", presetId, HotkeyAction.SelectPreset, presetId, gestureText);
         }
 
-        if (data.Ui.ClipSort is not ("name" or "importTime"))
+        if (data.Ui.ClipSort is not ("name" or "importTime" or "libraryOrder"))
         {
             issues.Add(new SettingsIssue("ui", "clipSort", $"unknown sort '{data.Ui.ClipSort}', using 'name'"));
             data.Ui.ClipSort = "name";

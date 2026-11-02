@@ -39,7 +39,8 @@ public sealed class ClipLibraryTests : IDisposable
 
     private string Write(string name, string contents)
     {
-        var path = Path.Combine(_dir, name);
+        var path = Path.GetFullPath(Path.Combine(_dir, name));
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, contents);
         return path;
     }
@@ -168,7 +169,7 @@ public sealed class ClipLibraryTests : IDisposable
     }
 
     [Fact]
-    public void Groups_are_single_level_and_deleting_a_group_only_ungroups()
+    public void Root_groups_reject_duplicate_names_and_deleting_only_ungroups()
     {
         using var library = OpenLib();
         var a = library.Import(SourceFile("a.wav")).Item;
@@ -255,6 +256,255 @@ public sealed class ClipLibraryTests : IDisposable
 
         using var reopened = OpenLib();
         Assert.Equal(0.5f, reopened.Find(item.ClipId)!.Gain);
+    }
+
+    [Fact]
+    public void Folder_plan_preserves_mixed_input_natural_depth_first_order_and_hierarchy_after_reopen()
+    {
+        var root = Path.Combine(_dir, "合集10");
+        Directory.CreateDirectory(Path.Combine(root, "分组10"));
+        Directory.CreateDirectory(Path.Combine(root, "分组2", "空目录"));
+        var first = SourceFile("先导.wav");
+        var last = SourceFile("末尾.MP3");
+        var expected = new[]
+        {
+            first,
+            Write("合集10/音效2.wav", "two"),
+            Write("合集10/音效02.wav", "padded"),
+            Write("合集10/音效10.MP3", "ten"),
+            Write("合集10/音效99999999999999999999.wav", "large"),
+            Write("合集10/音效100000000000000000000.wav", "larger"),
+            last,
+        };
+        var child2 = Write("合集10/分组2/子音2.wav", "child two");
+        var child10 = Write("合集10/分组10/子音10.mp3", "child ten");
+        Write("合集10/说明.txt", "not audio");
+        using var library = OpenLib();
+        var changes = 0;
+        library.Changed += () => changes++;
+
+        var plan = library.PrepareFolderImport([first, root, last]);
+
+        Assert.Equal(new[] { first, child2, child10 }.Concat(expected.Skip(1)), plan.Files.Select(f => f.Path));
+        Assert.Null(plan.Files[0].GroupId);
+        Assert.Null(plan.Files[^1].GroupId);
+        Assert.Equal(0, _decoder.Calls);
+        Assert.Empty(library.ItemsSnapshot());
+        Assert.Equal(1, changes);
+        var groups = library.GroupsSnapshot();
+        Assert.Equal(new[] { "合集10", "分组2", "空目录", "分组10" }, groups.Select(g => g.Name));
+        var rootGroup = groups[0];
+        Assert.Equal(new[] { rootGroup.GroupId }, plan.RootGroupIds);
+        Assert.Equal(rootGroup.GroupId, groups[1].ParentGroupId);
+        Assert.Equal(groups[1].GroupId, groups[2].ParentGroupId);
+        Assert.Equal(rootGroup.GroupId, groups[3].ParentGroupId);
+        Assert.Equal(groups[1].GroupId, plan.Files[1].GroupId);
+        Assert.Equal(groups[3].GroupId, plan.Files[2].GroupId);
+        foreach (var file in plan.Files) library.Import(file.Path, groupId: file.GroupId);
+
+        using var reopened = OpenLib();
+        Assert.Equal(groups, reopened.GroupsSnapshot());
+        Assert.Equal(plan.Files.Select(f => f.Path), reopened.Search(sort: ClipSortOrder.LibraryOrder).Select(c => c.OriginalImportPath));
+        Assert.Equal(plan.Files.Length - 2, reopened.Search(groupId: rootGroup.GroupId).Count);
+        var repeated = reopened.PrepareFolderImport([first, root, last]);
+        Assert.Equal(plan, repeated with { Files = plan.Files, RootGroupIds = plan.RootGroupIds });
+        Assert.Equal(plan.Files, repeated.Files);
+        Assert.Equal(plan.RootGroupIds, repeated.RootGroupIds);
+        Assert.Equal(groups, reopened.GroupsSnapshot());
+    }
+
+    [Fact]
+    public void Folder_roots_keep_input_order_and_child_names_are_unique_only_among_siblings()
+    {
+        var root10 = Path.Combine(_dir, "root10");
+        var root2 = Path.Combine(_dir, "root2");
+        Directory.CreateDirectory(Path.Combine(root10, "same"));
+        Directory.CreateDirectory(Path.Combine(root2, "same"));
+        using var library = OpenLib();
+
+        var plan = library.PrepareFolderImport([root10, root2]);
+        var groups = library.GroupsSnapshot();
+        Assert.Equal(new[] { "root10", "same", "root2", "same" }, groups.Select(g => g.Name));
+        Assert.Equal(new[] { groups[0].GroupId, groups[2].GroupId }, plan.RootGroupIds);
+        Assert.Empty(plan.Files);
+        Assert.Null(library.CreateGroup("same", groups[0].GroupId));
+        Assert.Null(library.CreateGroup("missing", "group-does-not-exist"));
+        var child = library.CreateGroup("another", groups[0].GroupId)!;
+        Assert.Equal(child.GroupId, library.GroupsSnapshot()[2].GroupId);
+        Assert.False(library.RenameGroup(child.GroupId, "same"));
+        Assert.True(library.RenameGroup(child.GroupId, "renamed"));
+        using var reopened = OpenLib();
+        Assert.Equal(library.GroupsSnapshot(), reopened.GroupsSnapshot());
+    }
+
+    [Fact]
+    public void Folder_duplicate_choice_groups_only_new_or_forced_copies()
+    {
+        var root = Path.Combine(_dir, "duplicate-folder");
+        Directory.CreateDirectory(root);
+        var source = Write("duplicate-folder/same.wav", "identical");
+        using var library = OpenLib();
+        var originalGroup = library.CreateGroup("Original")!;
+        var original = library.Import(source, groupId: originalGroup.GroupId).Item;
+        library.SetFavorite(original.ClipId, true);
+        library.SetGain(original.ClipId, 0.5f);
+        library.Rename(original.ClipId, "Keep me");
+        original = library.Find(original.ClipId)!;
+        var file = library.PrepareFolderImport([root]).Files.Single();
+
+        var duplicate = library.Import(file.Path, groupId: file.GroupId);
+        Assert.Equal(ImportOutcome.Duplicate, duplicate.Outcome);
+        Assert.Equal(original, duplicate.Item);
+        var forced = library.Import(file.Path, allowDuplicate: true, groupId: file.GroupId);
+        Assert.Equal(ImportOutcome.Imported, forced.Outcome);
+        Assert.Equal(file.GroupId, forced.Item.GroupId);
+        Assert.Equal(original, library.Find(original.ClipId));
+        using var reopened = OpenLib();
+        Assert.Equal(original, reopened.Find(original.ClipId));
+        Assert.Equal(forced.Item, reopened.Find(forced.Item.ClipId));
+        Assert.Equal(new[] { original.ClipId, forced.Item.ClipId }, reopened.Search(sort: ClipSortOrder.LibraryOrder).Select(c => c.ClipId));
+    }
+
+    [Fact]
+    public void Parent_delete_removes_all_descendant_groups_but_never_assets()
+    {
+        using var library = OpenLib();
+        var parent = library.CreateGroup("parent")!;
+        var sibling = library.CreateGroup("sibling")!;
+        var child = library.CreateGroup("child", parent.GroupId)!;
+        var grandchild = library.CreateGroup("grandchild", child.GroupId)!;
+        var a = library.Import(SourceFile("parent.wav"), groupId: parent.GroupId).Item;
+        var b = library.Import(SourceFile("child.wav"), groupId: child.GroupId).Item;
+        var c = library.Import(SourceFile("grandchild.wav"), groupId: grandchild.GroupId).Item;
+        var d = library.Import(SourceFile("sibling.wav"), groupId: sibling.GroupId).Item;
+        Assert.Equal(new[] { a.ClipId, b.ClipId, c.ClipId }, library.Search(sort: ClipSortOrder.LibraryOrder, groupId: parent.GroupId).Select(i => i.ClipId));
+
+        Assert.Equal(3, library.DeleteGroup(parent.GroupId));
+
+        Assert.Equal(sibling, library.GroupsSnapshot().Single());
+        Assert.Equal(sibling.GroupId, library.Find(d.ClipId)!.GroupId);
+        using var reopened = OpenLib();
+        foreach (var item in new[] { a, b, c })
+        {
+            Assert.Null(reopened.Find(item.ClipId)!.GroupId);
+            Assert.True(File.Exists(reopened.AssetAbsolutePath(item)));
+            Assert.True(File.Exists(item.OriginalImportPath));
+        }
+        Assert.Equal(4, reopened.ItemsSnapshot().Count);
+        Assert.Equal(0, reopened.DeleteGroup(parent.GroupId));
+    }
+
+    [Fact]
+    public void Legacy_flat_groups_load_as_roots()
+    {
+        var libRoot = Path.Combine(_dir, "lib");
+        Directory.CreateDirectory(libRoot);
+        Write("lib/index.json", """{"schemaVersion":1,"items":[],"groups":[{"groupId":"group-old","name":"旧分组"}]}""");
+
+        using var library = OpenLib();
+        Assert.Equal(new ClipGroup("group-old", "旧分组"), library.GroupsSnapshot().Single());
+        var child = library.CreateGroup("child", "group-old")!;
+        using var reopened = OpenLib();
+        Assert.Equal("group-old", reopened.GroupsSnapshot().Single(g => g.GroupId == child.GroupId).ParentGroupId);
+    }
+
+    [Theory]
+    [InlineData("""[{"groupId":"a","name":"A","parentGroupId":"missing"}]""")]
+    [InlineData("""[{"groupId":"a","name":"A","parentGroupId":"a"}]""")]
+    [InlineData("""[{"groupId":"a","name":"A","parentGroupId":"b"},{"groupId":"b","name":"B","parentGroupId":"a"}]""")]
+    public void Invalid_parent_hierarchies_refuse_to_load_without_overwriting(string groups)
+    {
+        Directory.CreateDirectory(Path.Combine(_dir, "lib"));
+        var json = "{\"schemaVersion\":1,\"items\":[],\"groups\":" + groups + "}";
+        var index = Write("lib/index.json", json);
+        Assert.Throws<ClipLibraryLoadException>(() => OpenLib());
+        Assert.Equal(json, File.ReadAllText(index));
+    }
+
+    [Fact]
+    public void Folder_enumeration_failure_does_not_persist_partial_groups()
+    {
+        using var library = OpenLib();
+        var root = Path.Combine(_dir, "valid");
+        Directory.CreateDirectory(root);
+        var index = Path.Combine(library.Root, "index.json");
+        library.CreateGroup("existing");
+        var before = File.ReadAllText(index);
+        Assert.ThrowsAny<IOException>(() => library.PrepareFolderImport([root, Path.Combine(_dir, "missing")]));
+        Assert.Single(library.GroupsSnapshot());
+        Assert.Equal(before, File.ReadAllText(index));
+    }
+
+    [Fact]
+    public void Failed_group_mutations_and_import_preserve_memory_disk_assets_and_library_order()
+    {
+        using var library = OpenLib();
+        var root = library.CreateGroup("Root")!;
+        var child = library.CreateGroup("Child", root.GroupId)!;
+        var first = library.Import(SourceFile("first.wav"), groupId: child.GroupId).Item;
+        library.Import(SourceFile("second.wav"));
+        var originalGroups = library.GroupsSnapshot();
+        var originalItems = library.ItemsSnapshot();
+        var originalAssets = Directory.GetFiles(Path.Combine(library.Root, "assets"));
+        var index = Path.Combine(library.Root, "index.json");
+        var originalIndex = File.ReadAllText(index);
+        Directory.CreateDirectory(index + ".tmp");
+        var folder = Path.Combine(_dir, "new-root");
+        Directory.CreateDirectory(folder);
+        var newSource = SourceFile("third.wav");
+        var changes = 0;
+        library.Changed += () => changes++;
+
+        Action[] mutations =
+        [
+            () => library.PrepareFolderImport([folder]),
+            () => library.CreateGroup("new-child", root.GroupId),
+            () => library.RenameGroup(root.GroupId, "renamed"),
+            () => library.DeleteGroup(root.GroupId),
+            () => library.Import(newSource, groupId: child.GroupId),
+            () => library.Delete(first.ClipId),
+        ];
+        foreach (var mutate in mutations)
+        {
+            var failure = Record.Exception(mutate);
+            Assert.True(failure is IOException or UnauthorizedAccessException, failure?.ToString());
+            Assert.Equal(originalGroups, library.GroupsSnapshot());
+            Assert.Equal(originalItems, library.Search(sort: ClipSortOrder.LibraryOrder));
+            Assert.Equal(originalIndex, File.ReadAllText(index));
+            Assert.Equal(originalAssets.Order(), Directory.GetFiles(Path.Combine(library.Root, "assets")).Order());
+            Assert.Equal(0, changes);
+        }
+        Assert.Throws<ClipImportException>(() => library.Import(newSource, groupId: "group-missing"));
+        Directory.Delete(index + ".tmp");
+        using var reopened = OpenLib();
+        Assert.Equal(originalGroups, reopened.GroupsSnapshot());
+        Assert.Equal(originalItems, reopened.Search(sort: ClipSortOrder.LibraryOrder));
+    }
+
+    [Fact]
+    public void Folder_plan_skips_reparse_directories_including_cycles_and_root_links()
+    {
+        var root = Path.Combine(_dir, "normal");
+        var external = Path.Combine(_dir, "external");
+        Directory.CreateDirectory(root);
+        Directory.CreateDirectory(external);
+        var source = Write("normal/real.wav", "real");
+        Write("external/hidden.wav", "outside");
+        try
+        {
+            Directory.CreateSymbolicLink(Path.Combine(root, "loop"), root);
+            Directory.CreateSymbolicLink(Path.Combine(root, "linked"), external);
+            Directory.CreateSymbolicLink(Path.Combine(_dir, "root-link"), external);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+        {
+            return; // Windows may require Developer Mode or symbolic-link privileges.
+        }
+        using var library = OpenLib();
+        var plan = library.PrepareFolderImport([root, Path.Combine(_dir, "root-link")]);
+        Assert.Equal(source, plan.Files.Single().Path);
+        Assert.Equal("normal", library.GroupsSnapshot().Single().Name);
+        Assert.Single(plan.RootGroupIds);
     }
 
     [Fact]

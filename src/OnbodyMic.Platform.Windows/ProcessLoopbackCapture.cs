@@ -4,11 +4,9 @@ using System.Runtime.InteropServices;
 using NAudio.Wave;
 
 /// <summary>
-/// Per-process loopback capture (Windows 10 2004+). Port of the Microsoft ApplicationLoopback
-/// sample: ActivateAudioInterfaceAsync with AUDIOCLIENT_ACTIVATION_PARAMS (VT_BLOB) against the
-/// VAD\Process_Loopback virtual device, then an event-driven IAudioCaptureClient loop.
-/// IIDs and vtable order verified against mingw-w64 mmdeviceapi.h and NAudio main
-/// (IUnknown-based, no IInspectable slots).
+/// Per-process tree loopback capture (Windows build 20348+), using Microsoft's
+/// ApplicationLoopback activation and shared-mode PCM16 format. Never falls back
+/// to endpoint/system loopback.
 /// </summary>
 public sealed class ProcessLoopbackCapture : IDisposable
 {
@@ -17,117 +15,143 @@ public sealed class ProcessLoopbackCapture : IDisposable
     private const int AudclntStreamflagsEventCallback = 0x00040000;
     private const int AudclntStreamflagsAutoConvertPcm = unchecked((int)0x80000000);
     private const int AudclntBufferflagsSilent = 0x2;
-
     private static readonly Guid IidIAudioClient = new("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2");
     private static readonly Guid IidIAudioCaptureClient = new("C8ADBD64-E71E-48A0-A4DE-185C395CD317");
-
+    private readonly Lock _gate = new();
     private IAudioClientCom? _audioClient;
     private IAudioCaptureClientCom? _captureClient;
     private IntPtr _sampleReadyEvent;
     private Thread? _captureThread;
+    private byte[] _scratch = [];
     private volatile bool _running;
+    private bool _started;
+    private bool _disposed;
 
-    /// <summary>Raised when the capture loop dies (target gone, device fault); never thrown on the thread.</summary>
     public event Action<Exception>? Faulted;
-
     public WaveFormat WaveFormat { get; }
 
-    /// <param name="rate">Capture sample rate (AUTOCONVERTPCM resamples in the engine).</param>
-    /// <param name="channels">Capture channels; 1 matches the engine bus directly.</param>
     public ProcessLoopbackCapture(int rate = 44100, int channels = 2)
     {
         WaveFormat = new WaveFormat(rate, 16, channels);
     }
 
-    /// <summary>Raw captured frames (16-bit PCM) as they arrive.</summary>
+    /// <summary>Borrowed PCM16 buffer, valid only during the callback. Count excludes unused capacity.</summary>
     public event Action<byte[], int>? DataAvailable;
 
     public void Start(uint targetProcessId, bool includeProcessTree)
     {
-        if (_audioClient is not null)
+        lock (_gate)
         {
-            throw new InvalidOperationException("capture already started");
-        }
-
-        var handler = new ActivationHandler();
-        var activationParams = new AudioClientActivationParams
-        {
-            ActivationType = AudioClientActivationType.ProcessLoopback,
-            ProcessLoopbackParams = new AudioClientProcessLoopbackParams
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_started) throw new InvalidOperationException("capture already started");
+            if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 20348))
+                throw new PlatformNotSupportedException("process-tree audio capture requires Windows build 20348 or newer");
+            ArgumentOutOfRangeException.ThrowIfZero(targetProcessId);
+            _started = true;
+            var handler = new ActivationHandler();
+            var activationParams = new AudioClientActivationParams
             {
-                TargetProcessId = targetProcessId,
-                ProcessLoopbackMode = includeProcessTree
-                    ? ProcessLoopbackMode.IncludeTargetProcessTree
-                    : ProcessLoopbackMode.ExcludeTargetProcessTree,
-            },
-        };
-
-        var paramsPtr = Marshal.AllocHGlobal(Marshal.SizeOf<AudioClientActivationParams>());
-        var variantPtr = Marshal.AllocHGlobal(Marshal.SizeOf<PropVariantBlobHeader>());
-        var formatPtr = BuildWaveFormatPointer();
-        try
-        {
-            Marshal.StructureToPtr(activationParams, paramsPtr, fDeleteOld: false);
-            Marshal.StructureToPtr(new PropVariantBlobHeader
+                ActivationType = AudioClientActivationType.ProcessLoopback,
+                ProcessLoopbackParams = new AudioClientProcessLoopbackParams
+                {
+                    TargetProcessId = targetProcessId,
+                    ProcessLoopbackMode = includeProcessTree
+                        ? ProcessLoopbackMode.IncludeTargetProcessTree : ProcessLoopbackMode.ExcludeTargetProcessTree,
+                },
+            };
+            var paramsPtr = Marshal.AllocHGlobal(Marshal.SizeOf<AudioClientActivationParams>());
+            var variantPtr = Marshal.AllocHGlobal(Marshal.SizeOf<PropVariantBlobHeader>());
+            var formatPtr = BuildWaveFormatPointer();
+            var stage = "activation";
+            try
             {
-                Vt = 0x41, // VT_BLOB
-                BlobSize = (uint)Marshal.SizeOf<AudioClientActivationParams>(),
-                BlobData = paramsPtr,
-            }, variantPtr, fDeleteOld: false);
-
-            Marshal.ThrowExceptionForHR(NativeMethods.ActivateAudioInterfaceAsync(
-                VirtualAudioDeviceProcessLoopback, in IidIAudioClient, variantPtr, handler, out var operationPtr));
-            _ = Marshal.Release(operationPtr);
-
-            if (!handler.Completion.Task.Wait(5000))
-            {
-                throw new TimeoutException("process loopback activation timed out");
+                Marshal.StructureToPtr(activationParams, paramsPtr, false);
+                Marshal.StructureToPtr(new PropVariantBlobHeader
+                {
+                    Vt = 0x41, BlobSize = (uint)Marshal.SizeOf<AudioClientActivationParams>(), BlobData = paramsPtr,
+                }, variantPtr, false);
+                Marshal.ThrowExceptionForHR(NativeMethods.ActivateAudioInterfaceAsync(
+                    VirtualAudioDeviceProcessLoopback, in IidIAudioClient, variantPtr, handler, out var operation));
+                if (operation != IntPtr.Zero) Marshal.Release(operation);
+                handler.Completion.Task.WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+                _audioClient = handler.TakeClient();
+                stage = "initialization";
+                Marshal.ThrowExceptionForHR(_audioClient.Initialize(0,
+                    AudclntStreamflagsLoopback | AudclntStreamflagsEventCallback | AudclntStreamflagsAutoConvertPcm,
+                    0, 0, formatPtr, IntPtr.Zero));
+                Marshal.ThrowExceptionForHR(_audioClient.GetBufferSize(out var bufferFrames));
+                _scratch = new byte[checked((int)bufferFrames * WaveFormat.BlockAlign)];
+                var captureIid = IidIAudioCaptureClient;
+                Marshal.ThrowExceptionForHR(_audioClient.GetService(ref captureIid, out var service));
+                _captureClient = (IAudioCaptureClientCom)service;
+                _sampleReadyEvent = NativeMethods.CreateEvent(IntPtr.Zero, false, false, null);
+                if (_sampleReadyEvent == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                Marshal.ThrowExceptionForHR(_audioClient.SetEventHandle(_sampleReadyEvent));
+                stage = "start";
+                Marshal.ThrowExceptionForHR(_audioClient.Start());
+                _running = true;
+                _captureThread = new Thread(CaptureLoop) { IsBackground = true, Name = "procloop" };
+                _captureThread.Start();
             }
-
-            _audioClient = (IAudioClientCom)handler.Completion.Task.Result;
-            Marshal.ThrowExceptionForHR(_audioClient.Initialize(
-                0, AudclntStreamflagsLoopback | AudclntStreamflagsEventCallback | AudclntStreamflagsAutoConvertPcm,
-                0, 0, formatPtr, IntPtr.Zero));
-            var captureIid = IidIAudioCaptureClient;
-            Marshal.ThrowExceptionForHR(_audioClient.GetService(ref captureIid, out var service));
-            _captureClient = (IAudioCaptureClientCom)service;
-
-            _sampleReadyEvent = NativeMethods.CreateEvent(IntPtr.Zero, manualReset: false, initialState: false, null);
-            Marshal.ThrowExceptionForHR(_audioClient.SetEventHandle(_sampleReadyEvent));
-            Marshal.ThrowExceptionForHR(_audioClient.Start());
-
-            _running = true;
-            _captureThread = new Thread(CaptureLoop) { IsBackground = true, Name = "procloop" };
-            _captureThread.Start();
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(formatPtr);
-            Marshal.FreeHGlobal(variantPtr);
-            Marshal.FreeHGlobal(paramsPtr);
+            catch (Exception ex)
+            {
+                _running = false;
+                ReleaseResources();
+                throw new InvalidOperationException($"process-tree capture {stage} failed for PID {targetProcessId}: {ex.Message} (0x{ex.HResult:X8})", ex);
+            }
+            finally
+            {
+                handler.Abandon();
+                Marshal.FreeHGlobal(formatPtr);
+                Marshal.FreeHGlobal(variantPtr);
+                Marshal.FreeHGlobal(paramsPtr);
+            }
         }
     }
 
     public void Stop()
     {
-        _running = false;
-        _captureThread?.Join(500);
-        _ = _audioClient?.Stop();
+        Thread? thread;
+        lock (_gate)
+        {
+            _running = false;
+            thread = _captureThread;
+            if (_sampleReadyEvent != IntPtr.Zero) NativeMethods.SetEvent(_sampleReadyEvent);
+        }
+        // Never join the callback thread itself, or release COM/handles while it is in use.
+        if (thread is not null && thread != Thread.CurrentThread) thread.Join();
+        lock (_gate) { _ = _audioClient?.Stop(); }
     }
 
     public void Dispose()
     {
-        Stop();
-        if (_sampleReadyEvent != IntPtr.Zero)
+        lock (_gate)
         {
-            _ = NativeMethods.CloseHandle(_sampleReadyEvent);
-            _sampleReadyEvent = IntPtr.Zero;
+            if (_disposed) return;
+            _disposed = true;
         }
+        Stop();
+        if (_captureThread == Thread.CurrentThread) return; // CaptureLoop's finally releases after its last callback.
+        lock (_gate) { ReleaseResources(); }
+    }
 
+    private void ReleaseResources()
+    {
+        _ = _audioClient?.Stop();
+        if (_captureClient is not null)
+        {
+            Marshal.ReleaseComObject(_captureClient);
+            _captureClient = null;
+        }
         if (_audioClient is not null)
         {
-            _ = Marshal.ReleaseComObject(_audioClient);
+            Marshal.ReleaseComObject(_audioClient);
             _audioClient = null;
+        }
+        if (_sampleReadyEvent != IntPtr.Zero)
+        {
+            NativeMethods.CloseHandle(_sampleReadyEvent);
+            _sampleReadyEvent = IntPtr.Zero;
         }
     }
 
@@ -137,83 +161,108 @@ public sealed class ProcessLoopbackCapture : IDisposable
         {
             while (_running)
             {
-                if (NativeMethods.WaitForSingleObject(_sampleReadyEvent, 200) != 0)
-                {
-                    continue;
-                }
-
+                var wait = NativeMethods.WaitForSingleObject(_sampleReadyEvent, 200);
+                if (wait == 258) continue; // WAIT_TIMEOUT
+                if (wait != 0) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
                 while (_running)
                 {
                     Marshal.ThrowExceptionForHR(_captureClient!.GetNextPacketSize(out var frames));
-                    if (frames == 0)
+                    if (frames == 0) break;
+                    Marshal.ThrowExceptionForHR(_captureClient.GetBuffer(out var data, out var packetFrames, out var flags, out _, out _));
+                    var bytes = 0;
+                    try
                     {
-                        break;
+                        bytes = checked((int)packetFrames * WaveFormat.BlockAlign);
+                        if (bytes > _scratch.Length) throw new InvalidOperationException("capture packet exceeds the negotiated buffer size");
+                        if ((flags & AudclntBufferflagsSilent) != 0) _scratch.AsSpan(0, bytes).Clear();
+                        else
+                        {
+                            if (data == IntPtr.Zero && bytes != 0) throw new InvalidOperationException("capture returned null non-silent audio data");
+                            Marshal.Copy(data, _scratch, 0, bytes);
+                        }
                     }
-
-                    Marshal.ThrowExceptionForHR(_captureClient.GetBuffer(
-                        out var data, out var packetFrames, out var flags, out _, out _));
-                    var bytes = (int)(packetFrames * WaveFormat.BlockAlign);
-                    var buffer = new byte[bytes];
-                    if (data != IntPtr.Zero && (flags & AudclntBufferflagsSilent) == 0)
-                    {
-                        Marshal.Copy(data, buffer, 0, bytes);
-                    }
-
-                    Marshal.ThrowExceptionForHR(_captureClient.ReleaseBuffer(packetFrames));
-                    DataAvailable?.Invoke(buffer, bytes);
+                    finally { Marshal.ThrowExceptionForHR(_captureClient.ReleaseBuffer(packetFrames)); }
+                    DataAvailable?.Invoke(_scratch, bytes);
                 }
             }
         }
         catch (Exception ex)
         {
-            // target process exit surfaces here as a buffer error; the session
-            // decides whether this is a normal end or a fault
-            Faulted?.Invoke(ex);
+            if (_running) Faulted?.Invoke(new InvalidOperationException($"process-tree capture failed: {ex.Message} (0x{ex.HResult:X8})", ex));
+        }
+        finally
+        {
+            _running = false;
+            lock (_gate) { if (_disposed) ReleaseResources(); }
         }
     }
 
     private IntPtr BuildWaveFormatPointer()
     {
-        var blockAlign = (short)(WaveFormat.Channels * 2);
+        var blockAlign = (short)WaveFormat.BlockAlign;
         var ptr = Marshal.AllocHGlobal(18);
-        Marshal.WriteInt16(ptr, 0, 1);                          // WAVE_FORMAT_PCM
-        Marshal.WriteInt16(ptr, 2, (short)WaveFormat.Channels); // channels
-        Marshal.WriteInt32(ptr, 4, WaveFormat.SampleRate);      // samples per second
-        Marshal.WriteInt32(ptr, 8, WaveFormat.SampleRate * blockAlign); // avg bytes per second
-        Marshal.WriteInt16(ptr, 12, blockAlign);                // block align
-        Marshal.WriteInt16(ptr, 14, 16);                        // bits per sample
-        Marshal.WriteInt16(ptr, 16, 0);                         // cbSize
+        Marshal.WriteInt16(ptr, 0, 1);
+        Marshal.WriteInt16(ptr, 2, (short)WaveFormat.Channels);
+        Marshal.WriteInt32(ptr, 4, WaveFormat.SampleRate);
+        Marshal.WriteInt32(ptr, 8, WaveFormat.SampleRate * blockAlign);
+        Marshal.WriteInt16(ptr, 12, blockAlign);
+        Marshal.WriteInt16(ptr, 14, 16);
+        Marshal.WriteInt16(ptr, 16, 0);
         return ptr;
     }
 
-    private sealed class ActivationHandler : IActivateAudioInterfaceCompletionHandlerCom
+    [ComVisible(true), ClassInterface(ClassInterfaceType.None)]
+    private sealed class ActivationHandler : IActivateAudioInterfaceCompletionHandlerCom, IAgileObjectCom
     {
-        public TaskCompletionSource<object> Completion { get; } = new();
+        private readonly Lock _gate = new();
+        private IAudioClientCom? _client;
+        private bool _abandoned;
+        public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public IAudioClientCom TakeClient()
+        {
+            lock (_gate)
+            {
+                var client = _client ?? throw new InvalidOperationException("activation returned no audio client");
+                _client = null;
+                return client;
+            }
+        }
+
+        public void Abandon()
+        {
+            lock (_gate)
+            {
+                _abandoned = true;
+                if (_client is not null) Marshal.ReleaseComObject(_client);
+                _client = null;
+            }
+        }
 
         public int ActivateCompleted(IntPtr operationPtr)
         {
+            IActivateAudioInterfaceAsyncOperationCom? operation = null;
+            IntPtr iface = IntPtr.Zero;
             try
             {
-                var operation = (IActivateAudioInterfaceAsyncOperationCom)Marshal.GetObjectForIUnknown(operationPtr);
-                Marshal.ThrowExceptionForHR(operation.GetActivateResult(out var hr, out var iface));
-                if (hr != 0)
+                operation = (IActivateAudioInterfaceAsyncOperationCom)Marshal.GetObjectForIUnknown(operationPtr);
+                Marshal.ThrowExceptionForHR(operation.GetActivateResult(out var hr, out iface));
+                Marshal.ThrowExceptionForHR(hr);
+                if (iface == IntPtr.Zero) throw new COMException("activation returned no interface");
+                var client = (IAudioClientCom)Marshal.GetObjectForIUnknown(iface);
+                lock (_gate)
                 {
-                    Completion.SetException(Marshal.GetExceptionForHR(hr) ?? new COMException($"activation failed: 0x{hr:X8}", hr));
+                    if (_abandoned) Marshal.ReleaseComObject(client);
+                    else _client = client;
                 }
-                else if (iface == IntPtr.Zero)
-                {
-                    Completion.SetException(new COMException("activation returned no interface"));
-                }
-                else
-                {
-                    Completion.SetResult(Marshal.GetObjectForIUnknown(iface));
-                }
+                Completion.TrySetResult();
             }
-            catch (Exception ex)
+            catch (Exception ex) { Completion.TrySetException(ex); }
+            finally
             {
-                Completion.TrySetException(ex);
+                if (iface != IntPtr.Zero) Marshal.Release(iface);
+                if (operation is not null) Marshal.ReleaseComObject(operation);
             }
-
             return 0;
         }
     }
@@ -274,8 +323,14 @@ internal static class NativeMethods
     public static extern int WaitForSingleObject(IntPtr handle, int milliseconds);
 
     [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetEvent(IntPtr handle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool CloseHandle(IntPtr handle);
 }
+
+[ComImport, ComVisible(true), Guid("94EA2B94-E9CC-49E0-C0FF-EE64CA8F5B90"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IAgileObjectCom { }
 
 [ComImport, Guid("41D949AB-9862-444A-80F6-C261334DA5EB"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 internal interface IActivateAudioInterfaceCompletionHandlerCom

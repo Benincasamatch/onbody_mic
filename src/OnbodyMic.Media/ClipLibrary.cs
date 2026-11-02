@@ -139,7 +139,25 @@ public sealed class ClipLibrary : IDisposable
                 throw new ClipLibraryLoadException($"group {dto.GroupId}: empty name");
             }
 
-            groups.Add(new ClipGroup(dto.GroupId, dto.Name));
+            groups.Add(new ClipGroup(dto.GroupId, dto.Name, dto.ParentGroupId));
+        }
+
+        var groupsById = groups.ToDictionary(g => g.GroupId);
+        var validatedGroups = new HashSet<string>();
+        foreach (var group in groups)
+        {
+            var chain = new HashSet<string>();
+            var current = group;
+            while (!validatedGroups.Contains(current.GroupId))
+            {
+                if (!chain.Add(current.GroupId))
+                    throw new ClipLibraryLoadException($"group hierarchy contains a cycle at '{current.GroupId}'");
+                if (current.ParentGroupId is null) break;
+                if (!groupsById.TryGetValue(current.ParentGroupId, out var parent))
+                    throw new ClipLibraryLoadException($"group {current.GroupId}: missing parent '{current.ParentGroupId}'");
+                current = parent;
+            }
+            validatedGroups.UnionWith(chain);
         }
 
         var knownGroups = groups.Select(g => g.GroupId).ToHashSet();
@@ -183,7 +201,7 @@ public sealed class ClipLibrary : IDisposable
     private string ResolveManagedPath(string relativePath) => Path.GetFullPath(Path.Combine(_root,
         relativePath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)));
 
-    /// <summary>Filter by name substring, optional favorites-only and group; sorted by name or import time (docs/01 §5.3).</summary>
+    /// <summary>Filter by name, favorites and a group's subtree; library order retains persisted insertion order.</summary>
     public IReadOnlyList<ClipItem> Search(string? query = null, ClipSortOrder sort = ClipSortOrder.Name, bool favoritesOnly = false, string? groupId = null)
     {
         lock (_gate)
@@ -201,13 +219,15 @@ public sealed class ClipLibrary : IDisposable
 
             if (groupId is not null)
             {
-                items = items.Where(i => i.GroupId == groupId);
+                var descendants = GroupSubtree(groupId);
+                items = items.Where(i => i.GroupId is not null && descendants.Contains(i.GroupId));
             }
 
             items = sort switch
             {
                 ClipSortOrder.Name => items.OrderBy(i => i.DisplayName, StringComparer.OrdinalIgnoreCase),
                 ClipSortOrder.ImportTime => items.OrderByDescending(i => i.ImportUnixMs),
+                ClipSortOrder.LibraryOrder => items,
                 _ => items,
             };
             return items.ToArray();
@@ -226,7 +246,7 @@ public sealed class ClipLibrary : IDisposable
         }
     }
 
-    public ImportResult Import(string sourcePath, string? displayName = null, bool allowDuplicate = false)
+    public ImportResult Import(string sourcePath, string? displayName = null, bool allowDuplicate = false, string? groupId = null)
     {
         var fullPath = Path.GetFullPath(sourcePath);
         if (!File.Exists(fullPath))
@@ -276,6 +296,9 @@ public sealed class ClipLibrary : IDisposable
                 return ImportResult.FromDuplicate(duplicate);
             }
 
+            if (groupId is not null && _groups.All(g => g.GroupId != groupId))
+                throw new ClipImportException($"group not found: {groupId}");
+
             var clipId = NewClipId(_items);
             var assetPath = $"assets/{clipId}{extension}";
             var assetAbsolute = ResolveManagedPath(assetPath);
@@ -290,7 +313,7 @@ public sealed class ClipLibrary : IDisposable
                 (int)duration.TotalMilliseconds,
                 extension.TrimStart('.'),
                 Favorite: false,
-                GroupId: null,
+                GroupId: groupId,
                 Gain: 1f,
                 DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
 
@@ -334,7 +357,7 @@ public sealed class ClipLibrary : IDisposable
         return MutateItem(clipId, item => item with { Gain = gain });
     }
 
-    /// <summary>Moves the clip into a group; null leaves it ungrouped (docs/01 §5.3 single-level groups).</summary>
+    /// <summary>Moves the clip into a group; null leaves it ungrouped.</summary>
     public bool SetGroup(string clipId, string? groupId)
     {
         lock (_gate)
@@ -343,12 +366,122 @@ public sealed class ClipLibrary : IDisposable
             {
                 return false;
             }
-        }
 
-        return MutateItem(clipId, item => item with { GroupId = groupId });
+            return MutateItem(clipId, item => item with { GroupId = groupId });
+        }
     }
 
-    public ClipGroup? CreateGroup(string name)
+    /// <summary>Plans mixed file/folder input in input order, persisting folder groups as one atomic mutation.</summary>
+    public FolderImportPlan PrepareFolderImport(IReadOnlyList<string> paths)
+    {
+        var entries = new List<FolderEntry>();
+        var pathComparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        var seenPaths = new HashSet<string>(pathComparer);
+        foreach (var path in paths)
+        {
+            if (string.IsNullOrWhiteSpace(path)) throw new ClipImportException("import path must not be empty");
+            AddFolderEntry(Path.GetFullPath(path), -1, entries, seenPaths);
+        }
+
+        lock (_gate)
+        {
+            var originalGroups = _groups;
+            _groups = new List<ClipGroup>(_groups);
+            var groupIds = new string?[entries.Count];
+            var files = new List<FolderImportFile>();
+            var roots = new List<string>();
+            try
+            {
+                for (var i = 0; i < entries.Count; i++)
+                {
+                    var entry = entries[i];
+                    var parentId = entry.ParentIndex < 0 ? null : groupIds[entry.ParentIndex];
+                    if (!entry.IsDirectory)
+                    {
+                        files.Add(new FolderImportFile(entry.Path, parentId));
+                        continue;
+                    }
+
+                    var name = new DirectoryInfo(entry.Path).Name;
+                    if (name.Length == 0) name = entry.Path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                    var group = _groups.FirstOrDefault(g => g.ParentGroupId == parentId &&
+                        g.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+                    if (group is null)
+                    {
+                        group = new ClipGroup(NewGroupId(_groups), name, parentId);
+                        InsertGroup(group, naturalSiblingOrder: true);
+                    }
+                    groupIds[i] = group.GroupId;
+                    if (entry.ParentIndex < 0 && !roots.Contains(group.GroupId)) roots.Add(group.GroupId);
+                }
+                if (_groups.Count != originalGroups.Count) SaveIndex();
+            }
+            catch
+            {
+                _groups = originalGroups;
+                throw;
+            }
+
+            if (_groups.Count != originalGroups.Count) Changed?.Invoke();
+            return new FolderImportPlan(files.ToArray(), roots.ToArray());
+        }
+    }
+
+    private sealed record FolderEntry(string Path, int ParentIndex, bool IsDirectory);
+
+    private static void AddFolderEntry(string path, int parentIndex, List<FolderEntry> entries, HashSet<string> seenPaths)
+    {
+        var attributes = File.GetAttributes(path);
+        if ((attributes & FileAttributes.ReparsePoint) != 0 || !seenPaths.Add(path)) return;
+        if ((attributes & FileAttributes.Directory) == 0)
+        {
+            var extension = Path.GetExtension(path);
+            if (extension.Equals(".wav", StringComparison.OrdinalIgnoreCase) || extension.Equals(".mp3", StringComparison.OrdinalIgnoreCase))
+                entries.Add(new FolderEntry(path, parentIndex, false));
+            return;
+        }
+
+        var directoryIndex = entries.Count;
+        entries.Add(new FolderEntry(path, parentIndex, true));
+        var children = Directory.GetFileSystemEntries(path);
+        Array.Sort(children, NaturalNameComparer.Instance);
+        foreach (var child in children) AddFolderEntry(child, directoryIndex, entries, seenPaths);
+    }
+
+    private HashSet<string> GroupSubtree(string groupId)
+    {
+        var children = _groups.Where(g => g.ParentGroupId is not null).ToLookup(g => g.ParentGroupId!);
+        var descendants = new HashSet<string> { groupId };
+        var pending = new Stack<string>();
+        pending.Push(groupId);
+        while (pending.TryPop(out var parent))
+        {
+            foreach (var child in children[parent])
+                if (descendants.Add(child.GroupId)) pending.Push(child.GroupId);
+        }
+        return descendants;
+    }
+
+    private void InsertGroup(ClipGroup group, bool naturalSiblingOrder = false)
+    {
+        if (group.ParentGroupId is null)
+        {
+            _groups.Add(group);
+            return;
+        }
+
+        var descendants = GroupSubtree(group.ParentGroupId);
+        var insertionIndex = _groups.FindLastIndex(g => descendants.Contains(g.GroupId)) + 1;
+        if (naturalSiblingOrder)
+        {
+            var nextSibling = _groups.FindIndex(g => g.ParentGroupId == group.ParentGroupId &&
+                NaturalNameComparer.Instance.Compare(g.Name, group.Name) > 0);
+            if (nextSibling >= 0) insertionIndex = nextSibling;
+        }
+        _groups.Insert(insertionIndex, group);
+    }
+
+    public ClipGroup? CreateGroup(string name, string? parentGroupId = null)
     {
         var trimmed = name.Trim();
         if (trimmed.Length == 0)
@@ -358,15 +491,16 @@ public sealed class ClipLibrary : IDisposable
 
         lock (_gate)
         {
-            if (_groups.Any(g => g.Name.Equals(trimmed, StringComparison.OrdinalIgnoreCase)))
+            if ((parentGroupId is not null && _groups.All(g => g.GroupId != parentGroupId)) ||
+                _groups.Any(g => g.ParentGroupId == parentGroupId && g.Name.Equals(trimmed, StringComparison.OrdinalIgnoreCase)))
             {
                 return null;
             }
 
-            var group = new ClipGroup(NewGroupId(_groups), trimmed);
+            var group = new ClipGroup(NewGroupId(_groups), trimmed, parentGroupId);
             try
             {
-                _groups.Add(group);
+                InsertGroup(group);
                 SaveIndex();
             }
             catch
@@ -385,13 +519,11 @@ public sealed class ClipLibrary : IDisposable
         var trimmed = name.Trim();
         lock (_gate)
         {
-            if (trimmed.Length == 0 || _groups.Any(g => g.GroupId != groupId && g.Name.Equals(trimmed, StringComparison.OrdinalIgnoreCase)))
-            {
-                return false;
-            }
-
             var index = _groups.FindIndex(g => g.GroupId == groupId);
-            if (index < 0)
+            if (index < 0) return false;
+            var original = _groups[index];
+            if (trimmed.Length == 0 || _groups.Any(g => g.GroupId != groupId &&
+                g.ParentGroupId == original.ParentGroupId && g.Name.Equals(trimmed, StringComparison.OrdinalIgnoreCase)))
             {
                 return false;
             }
@@ -404,7 +536,7 @@ public sealed class ClipLibrary : IDisposable
             }
             catch
             {
-                _groups[index] = _groups[index] with { Name = name };
+                _groups[index] = original;
                 throw;
             }
 
@@ -413,27 +545,35 @@ public sealed class ClipLibrary : IDisposable
         }
     }
 
-    /// <summary>Deletes the group; member clips move to ungrouped, never deleted (docs/06 §4.3). Returns the moved count.</summary>
+    /// <summary>Deletes a group subtree and ungroups its clips without deleting assets. Returns the moved count.</summary>
     public int DeleteGroup(string groupId)
     {
         lock (_gate)
         {
-            if (_groups.RemoveAll(g => g.GroupId == groupId) == 0)
-            {
-                return 0;
-            }
-
+            if (_groups.All(g => g.GroupId != groupId)) return 0;
+            var descendants = GroupSubtree(groupId);
+            var originalGroups = _groups;
+            var originalItems = _items;
+            _groups = _groups.Where(g => !descendants.Contains(g.GroupId)).ToList();
             var moved = 0;
-            for (var i = 0; i < _items.Count; i++)
+            _items = new List<ClipItem>(_items.Count);
+            foreach (var item in originalItems)
             {
-                if (_items[i].GroupId == groupId)
+                if (item.GroupId is not null && descendants.Contains(item.GroupId))
                 {
-                    _items[i] = _items[i] with { GroupId = null };
+                    _items.Add(item with { GroupId = null });
                     moved++;
                 }
+                else _items.Add(item);
             }
 
-            SaveIndex();
+            try { SaveIndex(); }
+            catch
+            {
+                _groups = originalGroups;
+                _items = originalItems;
+                throw;
+            }
             Changed?.Invoke();
             return moved;
         }
@@ -450,6 +590,7 @@ public sealed class ClipLibrary : IDisposable
                 return false;
             }
 
+            var originalIndex = _items.IndexOf(removed);
             _items.Remove(removed);
             try
             {
@@ -457,7 +598,7 @@ public sealed class ClipLibrary : IDisposable
             }
             catch
             {
-                _items.Add(removed);
+                _items.Insert(originalIndex, removed);
                 throw;
             }
         }
@@ -519,7 +660,7 @@ public sealed class ClipLibrary : IDisposable
                 Gain = i.Gain,
                 ImportUnixMs = i.ImportUnixMs,
             })],
-            Groups = [.. _groups.Select(g => new ClipGroupDto { GroupId = g.GroupId, Name = g.Name })],
+            Groups = [.. _groups.Select(g => new ClipGroupDto { GroupId = g.GroupId, Name = g.Name, ParentGroupId = g.ParentGroupId })],
         };
         AtomicFile.WriteText(_indexPath, JsonSerializer.Serialize(document, JsonOptions));
     }
@@ -654,5 +795,7 @@ public sealed class ClipLibrary : IDisposable
         public string GroupId { get; set; } = "";
 
         public string Name { get; set; } = "";
+
+        public string? ParentGroupId { get; set; }
     }
 }

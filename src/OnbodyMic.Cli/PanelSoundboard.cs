@@ -348,9 +348,14 @@ internal sealed class Soundboard : IDisposable
         var sort = ClipSortOrder.Name;
         for (var i = 0; i < parts.Length - 1; i++)
         {
-            if (parts[i] == "--sort" && parts[i + 1] == "time")
+            if (parts[i] == "--sort")
             {
-                sort = ClipSortOrder.ImportTime;
+                sort = parts[i + 1] switch
+                {
+                    "time" => ClipSortOrder.ImportTime,
+                    "libraryOrder" => ClipSortOrder.LibraryOrder,
+                    _ => ClipSortOrder.Name,
+                };
             }
         }
 
@@ -358,10 +363,10 @@ internal sealed class Soundboard : IDisposable
         string? groupId = null;
         if (groupName is not null)
         {
-            var group = Library.GroupsSnapshot().FirstOrDefault(g => g.Name.Equals(groupName, StringComparison.OrdinalIgnoreCase));
+            var group = FindGroup(groupName);
             if (group is null)
             {
-                Console.WriteLine($"分组不存在: {groupName}（可用: {string.Join(", ", Library.GroupsSnapshot().Select(g => g.Name))}）");
+                Console.WriteLine($"分组不存在或名称不唯一: {groupName}（可用: {string.Join(", ", Library.GroupsSnapshot().Select(g => GroupName(g.GroupId)))}）");
                 return;
             }
 
@@ -431,7 +436,7 @@ internal sealed class Soundboard : IDisposable
         if (parts.Length >= 3 && parts[1] == "del")
         {
             var group = FindGroup(JoinRest(parts, 2));
-            Console.WriteLine(group is not null ? $"已删除分组，{Library.DeleteGroup(group.GroupId)} 条移入未分组" : "分组不存在");
+            Console.WriteLine(group is not null ? $"已删除分组及子分组，{Library.DeleteGroup(group.GroupId)} 条移入未分组" : "分组不存在或名称不唯一");
             return;
         }
 
@@ -444,7 +449,7 @@ internal sealed class Soundboard : IDisposable
                 var group = FindGroup(groupName);
                 if (group is null)
                 {
-                    Console.WriteLine($"分组不存在（先 group add {groupName}）");
+                    Console.WriteLine($"分组不存在或名称不唯一（使用分组 ID 或完整路径，或先 group add {groupName}）");
                     return;
                 }
 
@@ -455,7 +460,7 @@ internal sealed class Soundboard : IDisposable
             return;
         }
 
-        Console.WriteLine("用法: group add|rename|del|set <名称|clipId ...>");
+        Console.WriteLine("用法: group add|rename|del|set <名称|clipId ...>；已有分组可使用 ID 或 父分组/子分组 路径");
     }
 
     private void HandleDelete(string[] parts)
@@ -743,10 +748,30 @@ internal sealed class Soundboard : IDisposable
     private string? GestureForClip(string clipId) =>
         _settings.Data.ClipHotkeys.TryGetValue(clipId, out var gesture) ? gesture : null;
 
-    private string? GroupName(string groupId) => Library?.GroupsSnapshot().FirstOrDefault(g => g.GroupId == groupId)?.Name ?? groupId;
+    private string GroupName(string groupId)
+    {
+        var groups = Library?.GroupsSnapshot();
+        if (groups is null) return groupId;
+        var names = new Stack<string>();
+        var group = groups.FirstOrDefault(g => g.GroupId == groupId);
+        if (group is null) return groupId;
+        while (group is not null)
+        {
+            names.Push(group.Name);
+            group = group.ParentGroupId is { } parentId ? groups.FirstOrDefault(g => g.GroupId == parentId) : null;
+        }
+        return string.Join("/", names);
+    }
 
-    private ClipGroup? FindGroup(string name) => Library?.GroupsSnapshot().FirstOrDefault(
-        g => g.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+    private ClipGroup? FindGroup(string name)
+    {
+        var groups = Library?.GroupsSnapshot();
+        if (groups is null) return null;
+        var exact = groups.FirstOrDefault(g => g.GroupId == name || GroupName(g.GroupId).Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (exact is not null) return exact;
+        var matches = groups.Where(g => g.Name.Equals(name, StringComparison.OrdinalIgnoreCase)).Take(2).ToArray();
+        return matches.Length == 1 ? matches[0] : null;
+    }
 
     private static string? Value(string[] parts, string key)
     {

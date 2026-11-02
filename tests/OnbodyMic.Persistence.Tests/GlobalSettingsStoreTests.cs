@@ -198,6 +198,19 @@ public sealed class GlobalSettingsStoreTests : IDisposable
     }
 
     [Fact]
+    public void Library_order_sort_survives_save_and_reload_without_issues()
+    {
+        var path = PathFor("settings.json");
+        var store = new GlobalSettingsStore(path);
+        var settings = new GlobalSettingsData { Ui = new UiPreferencesData { ClipSort = "libraryOrder" } };
+        store.Save(settings);
+
+        var reopened = store.Load();
+        Assert.Equal("libraryOrder", reopened.Data.Ui.ClipSort);
+        Assert.Empty(reopened.Issues);
+    }
+
+    [Fact]
     public void Invalid_clip_sort_falls_back_with_an_issue()
     {
         var path = PathFor("settings.json");

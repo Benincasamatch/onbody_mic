@@ -21,7 +21,6 @@ internal sealed class EngineRuntime : IAsyncDisposable
         public Action? Changed { get; set; }
         public TaskCompletionSource Ready { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
-    private sealed record LiveApplication(uint ProcessId, string Path, long StartTimeTicks);
 
     private readonly string _root;
     private readonly NdjsonWriter _writer;
@@ -38,7 +37,7 @@ internal sealed class EngineRuntime : IAsyncDisposable
     private readonly ConcurrentDictionary<string, byte> _deletingClips = new(StringComparer.Ordinal);
     private Dictionary<string, PresetConfig> _presets = new(StringComparer.Ordinal);
     private volatile LibraryView? _libraryView;
-    private volatile LiveApplication? _boundApplication;
+    private volatile WindowsAppCatalog.AppInstance? _boundApplication;
     private volatile string? _virtualRenderDeviceId;
     private LibrarySlot? _librarySlot;
     private SettingsData? _settings;
@@ -177,7 +176,7 @@ internal sealed class EngineRuntime : IAsyncDisposable
                 return Task.Run<object?>(ReadApplications, _lifetime.Token);
             case "bind_app":
                 BindApplication(CommandArguments.ProcessId(args), CommandArguments.String(args, "executablePath"),
-                    CommandArguments.String(args, "displayName"));
+                    CommandArguments.String(args, "displayName"), CommandArguments.String(args, "startTimeTicks"));
                 result = true;
                 break;
             case "route":
@@ -216,15 +215,23 @@ internal sealed class EngineRuntime : IAsyncDisposable
                 ClearIssue(PresetRoute.VirtualOutput);
                 result = true;
                 break;
+            case "prepare_folder_import":
+                var folderPaths = CommandArguments.Required(args, "paths");
+                if (folderPaths.ValueKind != JsonValueKind.Array ||
+                    folderPaths.EnumerateArray().Any(value => value.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(value.GetString())))
+                    throw HostCommandException.Invalid("paths must be an array of non-empty strings");
+                var importPaths = folderPaths.EnumerateArray().Select(value => value.GetString()!).ToArray();
+                return QueueLibraryWork(library => FolderImportData.FromDomain(library.PrepareFolderImport(importPaths)));
             case "import_clip":
                 var path = CommandArguments.String(args, "path");
                 var name = CommandArguments.OptionalString(args, "displayName");
                 if (name is not null && string.IsNullOrWhiteSpace(name))
                     throw HostCommandException.Invalid("displayName must not be empty");
                 var allowDuplicate = CommandArguments.OptionalBoolean(args, "allowDuplicate");
+                var importGroupId = CommandArguments.OptionalString(args, "groupId");
                 return QueueLibraryWork(library =>
                 {
-                    var imported = library.Import(path, name, allowDuplicate);
+                    var imported = library.Import(path, name, allowDuplicate, importGroupId);
                     return new ImportResultData(imported.Outcome.ToString(), ClipItemData.FromDomain(imported.Item, library),
                         imported.ExistingDuplicate is { } duplicate ? ClipItemData.FromDomain(duplicate, library) : null);
                 });
@@ -270,8 +277,13 @@ internal sealed class EngineRuntime : IAsyncDisposable
                 return DeleteClipAsync(CommandArguments.String(args, "clipId"));
             case "group_create":
                 var groupName = CommandArguments.String(args, "name");
-                return QueueLibraryWork(library => library.CreateGroup(groupName)
-                    ?? throw HostCommandException.Rejected("group name already exists"));
+                var parentGroupId = CommandArguments.OptionalString(args, "parentGroupId");
+                return QueueLibraryWork(library =>
+                {
+                    if (parentGroupId is not null) RequireGroup(library, parentGroupId);
+                    return library.CreateGroup(groupName, parentGroupId)
+                        ?? throw HostCommandException.Rejected("group name already exists");
+                });
             case "group_rename":
                 var renameGroupId = CommandArguments.String(args, "groupId");
                 var renameGroupName = CommandArguments.String(args, "name");
@@ -339,9 +351,9 @@ internal sealed class EngineRuntime : IAsyncDisposable
                 var expected = _boundApplication ?? throw new InvalidOperationException("no verified application binding");
                 var actual = ReadLiveApplication(binding.ProcessId);
                 if (expected.ProcessId != binding.ProcessId || expected.StartTimeTicks != actual.StartTimeTicks
-                    || !string.Equals(expected.Path, actual.Path, StringComparison.OrdinalIgnoreCase))
+                    || !string.Equals(expected.ExecutablePath, actual.ExecutablePath, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("application process identity changed; bind the live instance again");
-                return new WindowsAppSource(binding, channel);
+                return new WindowsAppSource(binding, channel, expected.StartTimeTicks);
             },
             OutputFactory = id => new WasapiExclusiveRenderPump(id),
             MonitorOutputFactory = id =>
@@ -782,56 +794,41 @@ internal sealed class EngineRuntime : IAsyncDisposable
         _issues = [];
     }
 
-    private void BindApplication(uint processId, string path, string displayName)
+    private void BindApplication(uint processId, string path, string displayName, string startTimeTicks)
     {
         if (_session!.Status().Switches.AppSendEnabled) throw HostCommandException.Rejected("app-send-active");
-        var actual = ReadLiveApplication(processId);
-        if (!string.Equals(Path.GetFullPath(path), actual.Path, StringComparison.OrdinalIgnoreCase))
-            throw HostCommandException.Rejected("application PID no longer matches the selected executable path");
-        RequireAccepted(_session.BindApplication(new AppBinding(processId, displayName), new AppSelection(actual.Path, displayName)));
+        if (!long.TryParse(startTimeTicks, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var expectedStartTime) || expectedStartTime <= 0)
+            throw HostCommandException.Invalid("startTimeTicks must be a positive decimal process creation time string");
+        var selected = ReadLiveApplication(processId);
+        if (selected.StartTimeTicks != expectedStartTime
+            || !string.Equals(Path.GetFullPath(path), selected.ExecutablePath, StringComparison.OrdinalIgnoreCase))
+            throw HostCommandException.Rejected("application process identity changed; refresh and select the live instance again");
+        WindowsAppCatalog.AppInstance actual;
+        try { actual = WindowsAppCatalog.ResolveCaptureRoot(selected); }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or ArgumentException)
+        {
+            throw HostCommandException.Rejected($"selected application root is unavailable: {ex.Message}");
+        }
+        RequireAccepted(_session.BindApplication(new AppBinding(actual.ProcessId, displayName),
+            new AppSelection(actual.ExecutablePath, displayName)));
         _boundApplication = actual;
         ClearIssue(PresetRoute.Application);
     }
 
-    private static LiveApplication ReadLiveApplication(uint processId)
+    private static WindowsAppCatalog.AppInstance ReadLiveApplication(uint processId)
     {
-        try
-        {
-            using var process = Process.GetProcessById(checked((int)processId));
-            if (process.HasExited) throw HostCommandException.Rejected("selected application process has exited");
-            var path = process.MainModule?.FileName;
-            if (string.IsNullOrWhiteSpace(path)) throw HostCommandException.Rejected("selected application executable path is inaccessible");
-            return new LiveApplication(processId, Path.GetFullPath(path), process.StartTime.ToUniversalTime().Ticks);
-        }
-        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        try { return WindowsAppCatalog.ReadLive(processId); }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+            or System.ComponentModel.Win32Exception or OverflowException or NotSupportedException)
         {
             throw HostCommandException.Rejected($"selected application is unavailable: {ex.Message}");
         }
     }
 
-    private object ReadApplications()
-    {
-        var result = new List<AppInstanceData>();
-        foreach (var process in Process.GetProcesses())
-        {
-            using (process)
-            {
-                _lifetime.Token.ThrowIfCancellationRequested();
-                try
-                {
-                    if (process.HasExited || process.MainModule?.FileName is not { Length: > 0 } path) continue;
-                    var title = process.MainWindowTitle;
-                    result.Add(new AppInstanceData((uint)process.Id, Path.GetFullPath(path),
-                        string.IsNullOrWhiteSpace(title) ? process.ProcessName : title));
-                }
-                catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or ArgumentException or NotSupportedException)
-                {
-                    // Protected, inaccessible or exited processes cannot be explicitly bound and are not invented in the picker.
-                }
-            }
-        }
-        return result.OrderBy(app => app.DisplayName, StringComparer.OrdinalIgnoreCase).ThenBy(app => app.ProcessId).ToArray();
-    }
+    private object ReadApplications() => WindowsAppCatalog.List(_lifetime.Token)
+        .Select(app => new AppInstanceData(app.ProcessId, app.ExecutablePath, app.DisplayName,
+            app.Category, app.StartTimeTicks.ToString(System.Globalization.CultureInfo.InvariantCulture))).ToArray();
 
     private Task<object?> QueueDeviceWork(Func<object?> operation)
     {

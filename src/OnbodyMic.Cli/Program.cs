@@ -819,13 +819,21 @@ internal static class Program
 
         var include = !options.GetValueOrDefault("mode", "include").Equals("exclude", StringComparison.OrdinalIgnoreCase);
         using var capture = new ProcessLoopbackCapture();
+        using var faulted = new ManualResetEventSlim();
+        Exception? captureFault = null;
+        capture.Faulted += ex => { captureFault = ex; faulted.Set(); };
         using var writer = new WaveFileWriter(outFile, capture.WaveFormat);
         capture.DataAvailable += (buffer, count) => writer.Write(buffer, 0, count);
         capture.Start(pid, include);
         Console.WriteLine($"capturing pid={pid} mode={(include ? "include-tree" : "exclude-tree")} format={capture.WaveFormat}");
-        Thread.Sleep(TimeSpan.FromSeconds(seconds));
+        faulted.Wait(TimeSpan.FromSeconds(seconds));
         capture.Stop();
         writer.Flush();
+        if (captureFault is not null)
+        {
+            Console.Error.WriteLine(captureFault.Message);
+            return 1;
+        }
         return 0;
     }
 

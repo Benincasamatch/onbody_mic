@@ -26,15 +26,22 @@ public sealed class NAudioClipDecoder : IClipDecoder
             throw new NotSupportedException($"unsupported clip format: {extension}");
         }
 
-        using var reader = new AudioFileReader(path);
+        // Media Foundation interprets filename input as a URL and rejects Windows
+        // verbatim paths supplied by the native shell. A byte stream keeps
+        // normal, UNC and long paths valid without rewriting the asset identity.
+        using var mp3Stream = extension == ".mp3" ? File.OpenRead(path) : null;
+        using WaveStream reader = mp3Stream is not null
+            ? new StreamMediaFoundationReader(mp3Stream)
+            : new AudioFileReader(path);
         if (reader.TotalTime.TotalSeconds > MaxDurationSeconds)
         {
             throw new InvalidDataException($"clip exceeds {MaxDurationSeconds}s bound");
         }
 
+        var input = reader.ToSampleProvider();
         var source = reader.WaveFormat.SampleRate == EngineFormat.Rate
-            ? (ISampleProvider)reader
-            : new WdlResamplingSampleProvider(reader, EngineFormat.Rate);
+            ? input
+            : new WdlResamplingSampleProvider(input, EngineFormat.Rate);
 
         var channels = source.WaveFormat.Channels;
         var frames = (int)(source.WaveFormat.SampleRate * reader.TotalTime.TotalSeconds) + 1;
