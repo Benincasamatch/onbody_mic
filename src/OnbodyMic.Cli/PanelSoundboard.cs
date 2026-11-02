@@ -748,9 +748,9 @@ internal sealed class Soundboard : IDisposable
     private string? GestureForClip(string clipId) =>
         _settings.Data.ClipHotkeys.TryGetValue(clipId, out var gesture) ? gesture : null;
 
-    private string GroupName(string groupId)
+    private string GroupName(string groupId, IReadOnlyList<ClipGroup>? groups = null)
     {
-        var groups = Library?.GroupsSnapshot();
+        groups ??= Library?.GroupsSnapshot();
         if (groups is null) return groupId;
         var names = new Stack<string>();
         var group = groups.FirstOrDefault(g => g.GroupId == groupId);
@@ -767,7 +767,7 @@ internal sealed class Soundboard : IDisposable
     {
         var groups = Library?.GroupsSnapshot();
         if (groups is null) return null;
-        var exact = groups.FirstOrDefault(g => g.GroupId == name || GroupName(g.GroupId).Equals(name, StringComparison.OrdinalIgnoreCase));
+        var exact = groups.FirstOrDefault(g => g.GroupId == name || GroupName(g.GroupId, groups).Equals(name, StringComparison.OrdinalIgnoreCase));
         if (exact is not null) return exact;
         var matches = groups.Where(g => g.Name.Equals(name, StringComparison.OrdinalIgnoreCase)).Take(2).ToArray();
         return matches.Length == 1 ? matches[0] : null;
