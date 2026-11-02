@@ -1,8 +1,9 @@
 import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import type { ClipItem, DesktopState, PresetApplyResult, PresetConfig, RuntimeState } from './types';
+import type { ClipItem, DesktopState, FolderImportResult, ImportFile, ImportResult, PresetApplyResult, PresetConfig, RuntimeState } from './types';
 import { desktopCommand, desktopState, errorMessage, nativeRuntime } from './bridge';
+import { descendantGroupIds } from './library';
 
 export interface LeaveRequest { type: 'switch' | 'exit'; presetId?: string }
 export interface DesktopContextValue {
@@ -56,14 +57,15 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [groupId, setGroupId] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
-  const [duplicatePath, setDuplicatePath] = useState<string | null>(null);
+  const [duplicate, setDuplicate] = useState<ImportFile | null>(null);
   const [leaveRequest, setLeaveRequest] = useState<LeaveRequest | null>(null);
   const [closeConfirmation, setCloseConfirmation] = useState(false);
   const mounted = useRef(true);
   const importingRef = useRef(false);
   const refreshSerial = useRef(0);
   const presetView = useRef<string | null>(null);
-  const importQueue = useRef<string[]>([]);
+  const importQueue = useRef<ImportFile[]>([]);
+  const duplicateRef = useRef<ImportFile | null>(null);
   const dirtyRef = useRef(false);
   const configRef = useRef<PresetConfig | null>(null);
 
@@ -90,7 +92,7 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
   async function perform<T>(op: string, args: object = {}): Promise<T> {
     try {
       const result = await desktopCommand<T>(op, args);
-      if (['preset_apply', 'preset_create', 'preset_save', 'preset_rename', 'preset_duplicate', 'preset_delete', 'preset_restore', 'settings_save', 'set_transparency', 'restart_engine', 'import_clip', 'clip_delete', 'clip_rename', 'clip_group', 'group_create', 'group_rename', 'group_delete', 'clip_favorite', 'clip_gain'].includes(op)) await refresh();
+      if (['preset_apply', 'preset_create', 'preset_save', 'preset_rename', 'preset_duplicate', 'preset_delete', 'preset_restore', 'settings_save', 'set_transparency', 'restart_engine', 'prepare_folder_import', 'import_clip', 'clip_delete', 'clip_rename', 'clip_group', 'group_create', 'group_rename', 'group_delete', 'clip_favorite', 'clip_gain'].includes(op)) await refresh();
       return result;
     } catch (failure) {
       setToast(errorMessage(failure));
@@ -137,8 +139,11 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
 
   const clips = state?.engine?.clips ?? [];
   const normalized = query.trim().toLocaleLowerCase();
-  const filteredClips = clips.filter(clip => (!normalized || clip.displayName.toLocaleLowerCase().includes(normalized)) && (!favoritesOnly || clip.favorite) && (!groupId || clip.groupId === groupId))
-    .sort((left, right) => state?.settings.ui.clipSort === 'importTime' ? right.importUnixMs - left.importUnixMs : left.displayName.localeCompare(right.displayName));
+  const groupIds = groupId ? descendantGroupIds(state?.engine?.groups ?? [], groupId) : null;
+  const filteredClips = clips.filter(clip => (!normalized || clip.displayName.toLocaleLowerCase().includes(normalized)) && (!favoritesOnly || clip.favorite) && (!groupIds || Boolean(clip.groupId && groupIds.has(clip.groupId))));
+  const sort = state?.settings.ui.clipSort;
+  if (sort === 'importTime') filteredClips.sort((left, right) => right.importUnixMs - left.importUnixMs);
+  else if (sort !== 'libraryOrder') filteredClips.sort((left, right) => left.displayName.localeCompare(right.displayName, undefined, { numeric: true }));
   const selectedClip = clips.find(clip => clip.clipId === selectedId) ?? clips[0] ?? null;
   const saved = state?.activePreset;
   const status = state?.engine?.status;
@@ -184,30 +189,49 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
     setImporting(true);
     try {
       while (importQueue.current.length) {
-        const path = importQueue.current.shift()!;
-        const result = await perform<{ outcome: 'Imported' | 'Duplicate'; item: ClipItem }>('import_clip', { path });
-        if (result.outcome === 'Duplicate') { setDuplicatePath(path); return; }
+        const file = importQueue.current[0];
+        const result = await perform<ImportResult>('import_clip', file);
+        importQueue.current.shift();
+        if (result.outcome === 'Duplicate') {
+          duplicateRef.current = file;
+          setDuplicate(file);
+          return;
+        }
         setSelectedId(result.item.clipId);
       }
+    } catch (failure) {
+      importQueue.current = [];
+      throw failure;
     } finally { importingRef.current = false; if (mounted.current) setImporting(false); }
   }
   async function importPaths(paths: string[]) {
-    if (importingRef.current || duplicatePath) throw new Error('请先处理当前导入请求');
-    importQueue.current.push(...paths);
+    if (importingRef.current || duplicateRef.current || importQueue.current.length) throw new Error('请先处理当前导入请求');
+    importingRef.current = true;
+    setImporting(true);
+    try {
+      const prepared = await perform<FolderImportResult>('prepare_folder_import', { paths });
+      if (state && prepared.rootGroupIds.length) {
+        await perform('settings_save', { settings: { ...state.settings, ui: { ...state.settings.ui, clipSort: 'libraryOrder' } } });
+        setFavoritesOnly(false);
+        setGroupId(null);
+      }
+      importQueue.current.push(...prepared.files);
+    } finally { importingRef.current = false; if (mounted.current) setImporting(false); }
     await drainImports();
   }
   async function resolveDuplicate(allow: boolean) {
-    const path = duplicatePath;
-    if (!path) return;
+    const file = duplicateRef.current;
+    if (!file || importingRef.current) return;
     if (allow) {
       setImporting(true);
       importingRef.current = true;
       try {
-        const result = await perform<{ item: ClipItem }>('import_clip', { path, allowDuplicate: true });
+        const result = await perform<ImportResult>('import_clip', { ...file, allowDuplicate: true });
         setSelectedId(result.item.clipId);
       } finally { importingRef.current = false; if (mounted.current) setImporting(false); }
     }
-    setDuplicatePath(null);
+    duplicateRef.current = null;
+    setDuplicate(null);
     await drainImports();
   }
   async function closeToTray(keep: boolean) {
@@ -218,7 +242,7 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
   const value: DesktopContextValue = {
     state, error, toast, selectedClip, selectClip: setSelectedId, query, setQuery,
     favoritesOnly, setFavoritesOnly, groupId, setGroupId, filteredClips,
-    importing, importPaths, duplicatePath, resolveDuplicate,
+    importing, importPaths, duplicatePath: duplicate?.path ?? null, resolveDuplicate,
     dirty, currentConfig, leaveRequest, resolveLeave, requestPreset,
     closeConfirmation, closeToTray, perform, refresh, notify: setToast,
   };

@@ -6,7 +6,7 @@ export type HotkeySection = 'globalHotkeys' | 'clipHotkeys' | 'presetHotkeys';
 export interface UiPreferencesData {
   startMinimized: boolean;
   closeToTrayAcknowledged: boolean;
-  clipSort: 'name' | 'importTime';
+  clipSort: 'name' | 'importTime' | 'libraryOrder';
   reduceTransparency?: boolean;
 }
 export interface SettingsData {
@@ -57,9 +57,9 @@ export interface ClipItem {
   importUnixMs: number;
   available: boolean;
 }
-export interface ClipGroup { groupId: string; name: string }
+export interface ClipGroup { groupId: string; name: string; parentGroupId: string | null }
 export interface AudioDevice { id: string; friendlyName: string; dataFlow: 'Render' | 'Capture'; state: string; isDefault: boolean }
-export interface AppInstance { processId: number; executablePath: string; displayName: string }
+export interface AppInstance { processId: number; executablePath: string; displayName: string; category: 'taskbar' | 'tray' | 'background'; startTimeTicks: string }
 export interface HotkeyBindingView { action: string; targetId: string | null; gesture: string }
 export interface SessionStatus {
   phase: 'Unconfigured' | 'ConfiguredMuted' | 'ReadyMuted' | 'Running' | 'EmergencyMuted' | 'OutputLost';
@@ -113,3 +113,5 @@ export interface PresetApplyResult {
   outputAttachRejection: string | null;
 }
 export interface ImportResult { outcome: 'Imported' | 'Duplicate'; item: ClipItem; existingDuplicate: ClipItem | null }
+export interface ImportFile { path: string; groupId: string | null }
+export interface FolderImportResult { files: ImportFile[]; rootGroupIds: string[] }

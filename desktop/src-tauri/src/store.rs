@@ -122,7 +122,7 @@ impl Store {
             return Err(CommandError::new("unsupported-schema", "配置 schemaVersion 必须为 1"));
         }
         let mut issues = Vec::new();
-        if data.ui.clip_sort != "name" && data.ui.clip_sort != "importTime" {
+        if !matches!(data.ui.clip_sort.as_str(), "name" | "importTime" | "libraryOrder") {
             issues.push(SettingsIssue { section: "ui".into(), key: "clipSort".into(), reason: "未知排序方式，使用名称排序".into() });
             data.ui.clip_sort = "name".into();
         }
@@ -247,7 +247,7 @@ fn load_settings(path: &Path) -> AppResult<(SettingsData, Vec<SettingsIssue>)> {
     normalize_document(&mut value, SETTINGS_FIELDS, SETTINGS_OBJECT_FIELDS);
     let mut issues = Vec::new();
     if let Some(ui) = value.get_mut("ui") {
-        if ui.get("clipSort").is_some_and(|sort| sort.as_str() != Some("name") && sort.as_str() != Some("importTime")) {
+        if ui.get("clipSort").is_some_and(|sort| !matches!(sort.as_str(), Some("name" | "importTime" | "libraryOrder"))) {
             ui["clipSort"] = Value::String("name".into());
             issues.push(SettingsIssue { section: "ui".into(), key: "clipSort".into(), reason: "未知排序方式，使用名称排序".into() });
         }
@@ -615,6 +615,19 @@ mod tests {
         assert!(written.get("micSendEnabled").is_none());
         assert_eq!(written["globalHotkeys"]["unknownAction"], "Ctrl+M");
         assert_eq!(fs::read_to_string(directory.path().join("settings.json.bak")).unwrap(), source);
+    }
+
+    #[test]
+    fn library_order_setting_survives_save_and_reopen() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open(directory.path().into()).unwrap();
+        let mut settings = store.settings().clone();
+        settings.ui.clip_sort = "libraryOrder".into();
+        store.save_settings(settings).unwrap();
+        assert!(store.settings_issues_shared().is_empty());
+        let reopened = Store::open(directory.path().into()).unwrap();
+        assert_eq!(reopened.settings().ui.clip_sort, "libraryOrder");
+        assert!(reopened.settings_issues_shared().is_empty());
     }
 
     #[test]

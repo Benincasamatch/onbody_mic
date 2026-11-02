@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent } from 'react';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
-import { Button, Dialog, Icon, IconButton } from './components';
+import { Button, ConfirmationDialog, Dialog, Icon, IconButton, Select } from './components';
 import { useDesktop } from './context';
 import { desktopCommand, errorMessage } from './bridge';
 import type { AppInstance, AudioDevice, ClipItem, HotkeySection, PresetApplyResult, PresetConfig, SettingsData } from './types';
+import { descendantGroupIds, groupOptions, groupPath } from './library';
 
 export function DeviceDialog({ close, existing }: { close(): void; existing?: PresetConfig | null }) {
   const desktop = useDesktop();
@@ -46,27 +47,66 @@ export function DeviceDialog({ close, existing }: { close(): void; existing?: Pr
   ];
   return <Dialog title={draft.presetId ? '设备与预设配置' : '创建预设与首次配置'} close={close}><form onSubmit={event => { void save(event); }}><p className="dialog-description">选择真实端点。保存并应用后所有发送与监听关闭，不会更改系统默认设备或 KOOK 输入。</p><label className="form-field">预设名称<input aria-label="预设名称" required value={draft.name} onChange={event => setDraft(current => ({ ...current, name: event.target.value }))} /></label><div className="device-fields">{fields.map(field => {
     const selected = devices.find(device => device.id === draft.devices[field.key]);
-    return <div key={field.key}><label className="form-field">{field.label}<select aria-label={field.label} required={field.key !== 'virtualCaptureDeviceId'} disabled={loading} value={draft.devices[field.key] ?? ''} onChange={event => setDraft(current => ({ ...current, devices: { ...current.devices, [field.key]: event.target.value || null } }))}><option value="">{loading ? '正在枚举设备…' : field.key === 'virtualCaptureDeviceId' ? '暂不配置（仅音效监听可用）' : '请选择设备'}</option>{draft.devices[field.key] && !selected && <option value={draft.devices[field.key] ?? ''}>已保存端点当前不可用</option>}{devices.filter(device => device.dataFlow === field.flow).map(device => <option key={device.id} value={device.id}>{device.friendlyName} · {device.state}{device.isDefault ? ' · 系统默认' : ''}</option>)}</select></label>{selected?.state === 'Disabled' && <Button variant="ghost" onClick={() => { void desktop.perform<AudioDevice[]>('device_enable', { deviceId: selected.id }).then(setDevices).catch(failure => setError(errorMessage(failure))); }}><Icon name="power" size={13} />启用选中的禁用设备</Button>}</div>;
-  })}</div><label className="form-field">监听偏好<select aria-label="预设监听模式" value={draft.monitor.mode} onChange={event => setDraft(current => ({ ...current, monitor: { ...current.monitor, mode: event.target.value as 'ClipOnly' | 'FullEndpoint' } }))}><option value="ClipOnly">仅音效</option><option value="FullEndpoint">实际虚拟麦</option></select></label><p className="form-notice">应用按进程树捕获；切预设后仍需重新确认运行中的进程。程序不安装音频驱动。</p>{error && <p className="inline-error" role="alert">{error}</p>}<div className="dialog-actions"><Button variant="ghost" onClick={() => { void reload().catch(failure => setError(errorMessage(failure))); }}><Icon name="refresh" size={14} />刷新设备</Button><Button onClick={close}>取消</Button><Button type="submit" variant="primary" disabled={saving || loading}>{saving ? '正在保存…' : '保存并应用'}</Button></div></form></Dialog>;
+    return <div key={field.key}><label className="form-field">{field.label}<Select aria-label={field.label} required={field.key !== 'virtualCaptureDeviceId'} disabled={loading} value={draft.devices[field.key] ?? ''} onChange={value => setDraft(current => ({ ...current, devices: { ...current.devices, [field.key]: value || null } }))} options={[{ value: '', label: loading ? '正在枚举设备…' : field.key === 'virtualCaptureDeviceId' ? '暂不配置（仅音效监听可用）' : '请选择设备' }, ...(draft.devices[field.key] && !selected ? [{ value: draft.devices[field.key] ?? '', label: '已保存端点当前不可用' }] : []), ...devices.filter(device => device.dataFlow === field.flow).map(device => ({ value: device.id, label: `${device.friendlyName} · ${device.state}${device.isDefault ? ' · 系统默认' : ''}` }))]} /></label>{selected?.state === 'Disabled' && <Button variant="ghost" onClick={() => { void desktop.perform<AudioDevice[]>('device_enable', { deviceId: selected.id }).then(setDevices).catch(failure => setError(errorMessage(failure))); }}><Icon name="power" size={13} />启用选中的禁用设备</Button>}</div>;
+  })}</div><label className="form-field">监听偏好<Select aria-label="预设监听模式" value={draft.monitor.mode} onChange={value => setDraft(current => ({ ...current, monitor: { ...current.monitor, mode: value as 'ClipOnly' | 'FullEndpoint' } }))} options={[{ value: 'ClipOnly', label: '仅音效' }, { value: 'FullEndpoint', label: '实际虚拟麦' }]} /></label><p className="form-notice">应用按进程树捕获；切预设后仍需重新确认运行中的进程。程序不安装音频驱动。</p>{error && <p className="inline-error" role="alert">{error}</p>}<div className="dialog-actions"><Button variant="ghost" onClick={() => { void reload().catch(failure => setError(errorMessage(failure))); }}><Icon name="refresh" size={14} />刷新设备</Button><Button onClick={close}>取消</Button><Button type="submit" variant="primary" disabled={saving || loading}>{saving ? '正在保存…' : '保存并应用'}</Button></div></form></Dialog>;
 }
 
 export function AppPickerDialog({ close }: { close(): void }) {
   const desktop = useDesktop();
   const [apps, setApps] = useState<AppInstance[]>([]);
-  const [selected, setSelected] = useState<number | null>(null);
+  const [selected, setSelected] = useState<AppInstance | null>(null);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
+  const [binding, setBinding] = useState(false);
   const [error, setError] = useState('');
-  useEffect(() => { let stopped = false; void desktopCommand<AppInstance[]>('apps').then(items => { if (!stopped) setApps(items); }).catch(failure => { if (!stopped) setError(errorMessage(failure)); }).finally(() => { if (!stopped) setLoading(false); }); return () => { stopped = true; }; }, []);
-  return <Dialog title="绑定运行中的应用" close={close}><p className="dialog-description">捕获包含选定应用及子进程，不是单个网页标签。不要把通话与音乐放在同一浏览器进程树。</p><label className="search-field"><Icon name="search" size={16} /><input aria-label="搜索运行中的应用" placeholder="应用名称或路径…" value={query} onChange={event => setQuery(event.target.value)} /></label><div className="app-picker-list">{apps.filter(app => `${app.displayName} ${app.executablePath}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())).map(app => <button key={app.processId} type="button" className={selected === app.processId ? 'selected' : ''} onClick={() => setSelected(app.processId)}><Icon name="app" size={19} /><span><strong>{app.displayName}</strong><small>{app.executablePath}</small></span><kbd>PID {app.processId}</kbd></button>)}{!apps.length && <p className="muted">{loading ? '正在枚举可访问的进程…' : '没有可绑定进程，请启动播放器后刷新。'}</p>}</div>{error && <p className="inline-error">{error}</p>}<div className="dialog-actions"><Button onClick={() => { setLoading(true); void desktop.perform<AppInstance[]>('apps').then(setApps).catch(failure => setError(errorMessage(failure))).finally(() => setLoading(false)); }}><Icon name="refresh" size={14} />刷新</Button><Button onClick={close}>取消</Button><Button variant="primary" disabled={selected === null} onClick={() => { const app = apps.find(app => app.processId === selected); if (app) void desktop.perform('bind_app', app).then(close).catch(failure => setError(errorMessage(failure))); }}>确认绑定此进程</Button></div></Dialog>;
+  const serial = useRef(0);
+  const bindingGuard = useRef(false);
+  async function reload() {
+    const request = ++serial.current;
+    setLoading(true); setError('');
+    try {
+      const items = await desktopCommand<AppInstance[]>('apps');
+      if (request !== serial.current) return;
+      setApps(items);
+      setSelected(current => current ? items.find(app => app.processId === current.processId && app.executablePath === current.executablePath && app.startTimeTicks === current.startTimeTicks) ?? null : null);
+    } catch (failure) { if (request === serial.current) setError(errorMessage(failure)); }
+    finally { if (request === serial.current) setLoading(false); }
+  }
+  useEffect(() => { void reload(); return () => { serial.current++; }; }, []);
+  async function bind() {
+    if (!selected || loading || bindingGuard.current) return;
+    bindingGuard.current = true; setBinding(true); setError('');
+    try {
+      await desktop.perform('bind_app', { processId: selected.processId, executablePath: selected.executablePath, displayName: selected.displayName, startTimeTicks: selected.startTimeTicks });
+      close();
+    } catch (failure) { setError(errorMessage(failure)); }
+    finally { bindingGuard.current = false; setBinding(false); }
+  }
+  const visible = apps.filter(app => `${app.displayName} ${app.executablePath} ${app.processId}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+  const categories: { id: AppInstance['category']; label: string }[] = [{ id: 'taskbar', label: '任务栏应用' }, { id: 'tray', label: '托盘应用' }, { id: 'background', label: '后台进程' }];
+  return <Dialog title="绑定运行中的应用" close={close} pending={binding}>
+    <p className="dialog-description">按任务栏、托盘、后台顺序列出可访问的应用。捕获包含选定应用及子进程，不是单个网页标签。不要把通话与音乐放在同一浏览器进程树。</p>
+    <label className="search-field"><Icon name="search" size={16} /><input aria-label="搜索运行中的应用" placeholder="应用名称、路径或 PID…" value={query} disabled={binding} onChange={event => setQuery(event.target.value)} /></label>
+    <div className="app-picker-list" aria-busy={loading}>{categories.map(category => {
+      const items = visible.filter(app => app.category === category.id);
+      return items.length > 0 && <section key={category.id} aria-label={category.label}><h3>{category.label}<small>{items.length}</small></h3>{items.map(app => <button key={`${app.processId}:${app.startTimeTicks}`} type="button" disabled={loading || binding} aria-pressed={selected?.processId === app.processId && selected.startTimeTicks === app.startTimeTicks} className={selected?.processId === app.processId && selected.startTimeTicks === app.startTimeTicks ? 'selected' : ''} onClick={() => setSelected(app)}><Icon name="app" size={19} /><span><strong>{app.displayName}</strong><small>{app.executablePath}</small></span><kbd>PID {app.processId}</kbd></button>)}</section>;
+    })}{!visible.length && <p className="muted" role="status">{loading ? '正在枚举可访问的进程…' : query ? '没有匹配的应用。' : '没有可绑定进程，请启动播放器后刷新。'}</p>}</div>
+    {error && <p className="inline-error" role="alert">{error}</p>}<div className="dialog-actions"><Button disabled={loading || binding} onClick={() => { void reload(); }}><Icon name="refresh" size={14} />{loading ? '正在刷新…' : '刷新'}</Button><Button disabled={binding} onClick={close}>取消</Button><Button variant="primary" disabled={!selected || loading || binding} onClick={() => { void bind(); }}>{binding ? '正在绑定…' : '确认绑定此进程'}</Button></div>
+  </Dialog>;
 }
 
 export function PresetsDialog({ close, create, edit }: { close(): void; create(): void; edit(config: PresetConfig): void }) {
   const desktop = useDesktop();
   const [rename, setRename] = useState<{ id: string; name: string; duplicate: boolean } | null>(null);
-  const [deleting, setDeleting] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<{ id: string; name: string } | null>(null);
   const [error, setError] = useState('');
-  return <Dialog title="预设管理" close={close}><div className="dialog-section-heading"><p className="dialog-description">恢复的是设备、增益和监听偏好，不恢复发送状态。</p><>{desktop.dirty && <Button onClick={() => { if (desktop.currentConfig) void desktop.perform('preset_save', { config: desktop.currentConfig }).catch(failure => setError(errorMessage(failure))); }}><Icon name="save" size={14} />保存当前预设</Button>}<Button variant="primary" onClick={create}><Icon name="plus" size={14} />创建预设</Button></></div><div className="preset-list">{desktop.state?.presets.map(preset => <div className={`preset-list-row ${preset.corrupt ? 'invalid' : ''}`} key={preset.presetId}><Icon name="presets" size={20} /><div className="preset-row-copy"><strong>{preset.name}</strong><small>{preset.corrupt ? preset.reason : desktop.state?.activePreset?.presetId === preset.presetId ? '当前预设' : preset.presetId}</small></div><div className="inline-actions"><IconButton icon="settings" label={`编辑预设${preset.name}`} disabled={preset.corrupt} onClick={() => { void desktop.perform<PresetConfig>('preset_load', { presetId: preset.presetId }).then(edit).catch(failure => setError(errorMessage(failure))); }} /><IconButton icon="copy" label={`复制预设${preset.name}`} disabled={preset.corrupt} onClick={() => setRename({ id: preset.presetId, name: `${preset.name} 副本`, duplicate: true })} /><IconButton icon="more" label={`重命名预设${preset.name}`} disabled={preset.corrupt} onClick={() => setRename({ id: preset.presetId, name: preset.name, duplicate: false })} /><IconButton icon="refresh" label={`恢复预设备份${preset.name}`} onClick={() => { void desktop.perform('preset_restore', { presetId: preset.presetId }).then(() => desktop.notify('已恢复经验证的备份；当前发送状态不会开启。')).catch(failure => setError(errorMessage(failure))); }} /><IconButton icon="delete" label={`删除预设${preset.name}`} onClick={() => setDeleting(preset.presetId)} /><Button disabled={preset.corrupt} onClick={() => { void desktop.requestPreset(preset.presetId).then(close).catch(failure => setError(errorMessage(failure))); }}>应用</Button></div></div>)}</div>{!desktop.state?.presets.length && <p className="muted">还没有预设，先创建并选择真实设备。</p>}{rename && <form className="inline-editor" onSubmit={event => { event.preventDefault(); void desktop.perform(rename.duplicate ? 'preset_duplicate' : 'preset_rename', { presetId: rename.id, name: rename.name }).then(() => setRename(null)).catch(failure => setError(errorMessage(failure))); }}><label className="form-field">{rename.duplicate ? '副本名称' : '新名称'}<input autoFocus required aria-label="预设新名称" value={rename.name} onChange={event => setRename(current => current ? { ...current, name: event.target.value } : null)} /></label><Button onClick={() => setRename(null)}>取消</Button><Button type="submit" variant="primary">保存</Button></form>}{deleting && <div className="confirmation-box"><p>确定删除此预设？如果它正在使用，会先关闭并清除音频配置。原音效素材不会删除。</p><div className="inline-actions"><Button onClick={() => setDeleting(null)}>取消</Button><Button variant="danger" onClick={() => { void desktop.perform('preset_delete', { presetId: deleting }).then(() => setDeleting(null)).catch(failure => setError(errorMessage(failure))); }}>确认删除预设</Button></div></div>}{error && <p className="inline-error" role="alert">{error}</p>}</Dialog>;
+  return <><Dialog title="预设管理" close={close}>
+    <div className="dialog-section-heading"><p className="dialog-description">恢复的是设备、增益和监听偏好，不恢复发送状态。</p><>{desktop.dirty && <Button onClick={() => { if (desktop.currentConfig) void desktop.perform('preset_save', { config: desktop.currentConfig }).catch(failure => setError(errorMessage(failure))); }}><Icon name="save" size={14} />保存当前预设</Button>}<Button variant="primary" onClick={create}><Icon name="plus" size={14} />创建预设</Button></></div>
+    <div className="preset-list">{desktop.state?.presets.map(preset => <div className={`preset-list-row ${preset.corrupt ? 'invalid' : ''}`} key={preset.presetId}><Icon name="presets" size={20} /><div className="preset-row-copy"><strong>{preset.name}</strong><small>{preset.corrupt ? preset.reason : desktop.state?.activePreset?.presetId === preset.presetId ? '当前预设' : preset.presetId}</small></div><div className="inline-actions"><IconButton icon="settings" label={`编辑预设${preset.name}`} disabled={preset.corrupt} onClick={() => { void desktop.perform<PresetConfig>('preset_load', { presetId: preset.presetId }).then(edit).catch(failure => setError(errorMessage(failure))); }} /><IconButton icon="copy" label={`复制预设${preset.name}`} disabled={preset.corrupt} onClick={() => setRename({ id: preset.presetId, name: `${preset.name} 副本`, duplicate: true })} /><IconButton icon="more" label={`重命名预设${preset.name}`} disabled={preset.corrupt} onClick={() => setRename({ id: preset.presetId, name: preset.name, duplicate: false })} /><IconButton icon="refresh" label={`恢复预设备份${preset.name}`} onClick={() => { void desktop.perform('preset_restore', { presetId: preset.presetId }).then(() => desktop.notify('已恢复经验证的备份；当前发送状态不会开启。')).catch(failure => setError(errorMessage(failure))); }} /><IconButton icon="delete" label={`删除预设${preset.name}`} onClick={() => setDeleting({ id: preset.presetId, name: preset.name })} /><Button disabled={preset.corrupt} onClick={() => { void desktop.requestPreset(preset.presetId).then(close).catch(failure => setError(errorMessage(failure))); }}>应用</Button></div></div>)}</div>
+    {!desktop.state?.presets.length && <p className="muted">还没有预设，先创建并选择真实设备。</p>}
+    {rename && <form className="inline-editor" onSubmit={event => { event.preventDefault(); void desktop.perform(rename.duplicate ? 'preset_duplicate' : 'preset_rename', { presetId: rename.id, name: rename.name }).then(() => setRename(null)).catch(failure => setError(errorMessage(failure))); }}><label className="form-field">{rename.duplicate ? '副本名称' : '新名称'}<input autoFocus required aria-label="预设新名称" value={rename.name} onChange={event => setRename(current => current ? { ...current, name: event.target.value } : null)} /></label><Button onClick={() => setRename(null)}>取消</Button><Button type="submit" variant="primary">保存</Button></form>}
+    {error && <p className="inline-error" role="alert">{error}</p>}
+  </Dialog>{deleting && <ConfirmationDialog title="确认删除预设" close={() => setDeleting(null)} confirm={async () => { await desktop.perform('preset_delete', { presetId: deleting.id }); if (rename?.id === deleting.id) setRename(null); }}><p>确定删除「{deleting.name}」？如果它正在使用，会先关闭并清除音频配置。原音效素材不会删除。</p></ConfirmationDialog>}</>;
 }
 
 export function ClipDialog({ clip, close, hotkeys }: { clip: ClipItem; close(): void; hotkeys(): void }) {
@@ -74,7 +114,7 @@ export function ClipDialog({ clip, close, hotkeys }: { clip: ClipItem; close(): 
   const [name, setName] = useState(clip.displayName);
   const [gain, setGain] = useState(Math.round(clip.gain * 100));
   const [group, setGroup] = useState(clip.groupId ?? '');
-  const [references, setReferences] = useState<{ presetId: string; name: string }[] | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   async function save(event: FormEvent) {
@@ -82,16 +122,31 @@ export function ClipDialog({ clip, close, hotkeys }: { clip: ClipItem; close(): 
     try { if (name !== clip.displayName) await desktop.perform('clip_rename', { clipId: clip.clipId, name }); if (gain !== Math.round(clip.gain * 100)) await desktop.perform('clip_gain', { clipId: clip.clipId, gain: gain / 100 }); if (group !== (clip.groupId ?? '')) await desktop.perform('clip_group', { clipId: clip.clipId, groupId: group || null }); close(); }
     catch (failure) { setError(errorMessage(failure)); } finally { setBusy(false); }
   }
-  return <Dialog title="音效详情与管理" close={close}><form onSubmit={event => { void save(event); }}><div className="clip-dialog-summary"><span className="clip-art"><Icon name="audio" size={38} /></span><div><strong>{clip.displayName}</strong><p>{clip.format.toUpperCase()} · {(clip.durationMs / 1000).toFixed(2)}s · {clip.available ? '素材可用' : '素材文件缺失'}</p><small>{clip.clipId}</small></div></div><label className="form-field">音效名称<input aria-label="音效名称" required value={name} onChange={event => setName(event.target.value)} /></label><div className="form-two-columns"><label className="form-field">单条音效增益 (%)<input aria-label="单条音效增益" type="number" min="0" max="400" step="1" value={gain} onChange={event => setGain(Number(event.target.value))} /></label><label className="form-field">分组<select aria-label="音效分组" value={group} onChange={event => setGroup(event.target.value)}><option value="">未分组</option>{desktop.state?.engine?.groups.map(group => <option key={group.groupId} value={group.groupId}>{group.name}</option>)}</select></label></div><div className="inline-actions"><Button onClick={hotkeys}><Icon name="keyboard" size={14} />编辑播放热键</Button><Button onClick={() => { void desktop.perform<{ managedPath: string; originalPath: string | null }>('clip_path', { clipId: clip.clipId }).then(path => revealItemInDir(path.managedPath)).catch(failure => setError(errorMessage(failure))); }}><Icon name="folder" size={14} />打开文件位置</Button></div><div className="dialog-actions"><Button variant="danger" onClick={() => { void desktop.perform<{ presetId: string; name: string }[]>('clip_references', { clipId: clip.clipId }).then(setReferences).catch(failure => setError(errorMessage(failure))); }}><Icon name="delete" size={14} />删除副本</Button><Button onClick={close}>取消</Button><Button type="submit" variant="primary" disabled={busy}>{busy ? '正在保存…' : '保存修改'}</Button></div></form>{references && <div className="confirmation-box"><p>只删除受管素材副本，不修改原文件。{references.length ? `以下预设引用此条目：${references.map(reference => reference.name).join('、')}。引用会显示为缺失，请稍后处理。` : '当前可读取预设没有此条目的布局引用。'}</p><div className="inline-actions"><Button onClick={() => setReferences(null)}>取消删除</Button><Button variant="danger" onClick={() => { void desktop.perform('clip_delete', { clipId: clip.clipId }).then(close).catch(failure => setError(errorMessage(failure))); }}>确认删除音效副本</Button></div></div>}{error && <p className="inline-error" role="alert">{error}</p>}</Dialog>;
+  return <><Dialog title="音效详情与管理" close={close}><form onSubmit={event => { void save(event); }}>
+    <div className="clip-dialog-summary"><span className="clip-art"><Icon name="audio" size={38} /></span><div><strong>{clip.displayName}</strong><p>{clip.format.toUpperCase()} · {(clip.durationMs / 1000).toFixed(2)}s · {clip.available ? '素材可用' : '素材文件缺失'}</p><small>{clip.clipId}</small></div></div>
+    <label className="form-field">音效名称<input aria-label="音效名称" required value={name} onChange={event => setName(event.target.value)} /></label>
+    <div className="form-two-columns"><label className="form-field">单条音效增益 (%)<input aria-label="单条音效增益" type="number" min="0" max="400" step="1" value={gain} onChange={event => setGain(Number(event.target.value))} /></label><label className="form-field">分组<Select aria-label="音效分组" value={group} onChange={setGroup} options={[{ value: '', label: '未分组' }, ...groupOptions(desktop.state?.engine?.groups ?? [])]} /></label></div>
+    <div className="inline-actions"><Button onClick={hotkeys}><Icon name="keyboard" size={14} />编辑播放热键</Button><Button onClick={() => { void desktop.perform<{ managedPath: string; originalPath: string | null }>('clip_path', { clipId: clip.clipId }).then(path => revealItemInDir(path.managedPath)).catch(failure => setError(errorMessage(failure))); }}><Icon name="folder" size={14} />打开文件位置</Button></div>
+    <div className="dialog-actions"><Button variant="danger" disabled={busy} onClick={() => setDeleting(true)}><Icon name="delete" size={14} />删除副本</Button><Button onClick={close}>取消</Button><Button type="submit" variant="primary" disabled={busy}>{busy ? '正在保存…' : '保存修改'}</Button></div>
+  </form>{error && <p className="inline-error" role="alert">{error}</p>}</Dialog>{deleting && <ConfirmationDialog title="确认删除音效副本" close={() => setDeleting(false)} confirm={async () => { await desktop.perform('clip_delete', { clipId: clip.clipId }); close(); }} prepare={async () => { const references = await desktopCommand<{ presetId: string; name: string }[]>('clip_references', { clipId: clip.clipId }); return references.length ? `以下预设引用此条目：${references.map(reference => reference.name).join('、')}。引用会显示为缺失，请稍后处理。` : '当前可读取预设没有此条目的布局引用。'; }}><p>确定删除「{clip.displayName}」？只删除受管素材副本，不修改原文件。尚未保存的详情修改不会写入。</p></ConfirmationDialog>}</>;
 }
 
 export function GroupsDialog({ close }: { close(): void }) {
   const desktop = useDesktop();
   const [name, setName] = useState('');
   const [edit, setEdit] = useState<{ id: string; name: string } | null>(null);
-  const [deleting, setDeleting] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<{ id: string; name: string } | null>(null);
   const [error, setError] = useState('');
-  return <Dialog title="管理音效分组" close={close}><form className="inline-editor" onSubmit={event => { event.preventDefault(); void desktop.perform('group_create', { name }).then(() => setName('')).catch(failure => setError(errorMessage(failure))); }}><label className="form-field">新分组名称<input required aria-label="新分组名称" value={name} onChange={event => setName(event.target.value)} /></label><Button type="submit" variant="primary"><Icon name="plus" size={14} />创建</Button></form><div className="group-list">{desktop.state?.engine?.groups.map(group => <div key={group.groupId}><Icon name="folder" size={17} /><span>{group.name}</span><small>{desktop.state?.engine?.clips.filter(clip => clip.groupId === group.groupId).length} 条音效</small><IconButton icon="more" label={`重命名分组${group.name}`} onClick={() => setEdit({ id: group.groupId, name: group.name })} /><IconButton icon="delete" label={`删除分组${group.name}`} onClick={() => setDeleting(group.groupId)} /></div>)}</div>{edit && <form className="inline-editor" onSubmit={event => { event.preventDefault(); void desktop.perform('group_rename', { groupId: edit.id, name: edit.name }).then(() => setEdit(null)).catch(failure => setError(errorMessage(failure))); }}><input aria-label="分组新名称" required value={edit.name} onChange={event => setEdit(current => current ? { ...current, name: event.target.value } : null)} /><Button onClick={() => setEdit(null)}>取消</Button><Button type="submit">保存</Button></form>}{deleting && <div className="confirmation-box"><p>删除分组后，成员音效移到未分组，不会删除任何素材。</p><Button onClick={() => setDeleting(null)}>取消</Button><Button variant="danger" onClick={() => { void desktop.perform('group_delete', { groupId: deleting }).then(() => { if (desktop.groupId === deleting) desktop.setGroupId(null); setDeleting(null); }).catch(failure => setError(errorMessage(failure))); }}>确认删除分组</Button></div>}{error && <p className="inline-error">{error}</p>}</Dialog>;
+  const groups = desktop.state?.engine?.groups ?? [];
+  return <><Dialog title="管理音效分组" close={close}>
+    <form className="inline-editor" onSubmit={event => { event.preventDefault(); void desktop.perform('group_create', { name }).then(() => setName('')).catch(failure => setError(errorMessage(failure))); }}><label className="form-field">新分组名称<input required aria-label="新分组名称" value={name} onChange={event => setName(event.target.value)} /></label><Button type="submit" variant="primary"><Icon name="plus" size={14} />创建</Button></form>
+    <div className="group-list">{groupOptions(groups).map(option => {
+      const group = groups.find(group => group.groupId === option.value)!;
+      const ids = descendantGroupIds(groups, group.groupId);
+      return <div key={group.groupId} style={{ paddingLeft: `${(groupPath(groups, group.groupId).length - 1) * 18 + 4}px` }}><Icon name="folder" size={17} /><span title={option.label}>{group.name}</span><small>{desktop.state?.engine?.clips.filter(clip => clip.groupId && ids.has(clip.groupId)).length} 条音效</small><IconButton icon="more" label={`重命名分组${option.label}`} onClick={() => setEdit({ id: group.groupId, name: group.name })} /><IconButton icon="delete" label={`删除分组${option.label}`} onClick={() => setDeleting({ id: group.groupId, name: option.label })} /></div>;
+    })}</div>
+    {edit && <form className="inline-editor" onSubmit={event => { event.preventDefault(); void desktop.perform('group_rename', { groupId: edit.id, name: edit.name }).then(() => setEdit(null)).catch(failure => setError(errorMessage(failure))); }}><input aria-label="分组新名称" required value={edit.name} onChange={event => setEdit(current => current ? { ...current, name: event.target.value } : null)} /><Button onClick={() => setEdit(null)}>取消</Button><Button type="submit">保存</Button></form>}{error && <p className="inline-error" role="alert">{error}</p>}
+  </Dialog>{deleting && <ConfirmationDialog title="确认删除分组" close={() => setDeleting(null)} confirm={async () => { const ids = descendantGroupIds(groups, deleting.id); await desktop.perform('group_delete', { groupId: deleting.id }); if (desktop.groupId && ids.has(desktop.groupId)) desktop.setGroupId(null); if (edit && ids.has(edit.id)) setEdit(null); }}><p>删除「{deleting.name}」及其所有子分组后，成员音效移到未分组，不会删除任何素材。</p></ConfirmationDialog>}</>;
 }
 
 const actionLabels: Record<string, string> = { emergencyMute: '全部静音', stopClip: '停止音效', toggleMicSend: '真麦发送开关', toggleExtrasSend: '附加音频开关', toggleMonitor: '监听开关', playClip: '播放音效', selectPreset: '选择预设' };
@@ -104,6 +159,16 @@ export function HotkeysDialog({ close }: { close(): void }) {
   const [saving, setSaving] = useState(false);
   const settings = desktop.state?.settings;
   useEffect(() => { return () => { void desktopCommand('hotkeys_suspend', { value: false }).catch(failure => desktop.notify(errorMessage(failure))); }; }, []);
+  useEffect(() => {
+    if (!recording) return;
+    function escape(event: globalThis.KeyboardEvent) {
+      if (event.key !== 'Escape') return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (!saving) void cancelRecording().catch(failure => setError(errorMessage(failure)));
+    }
+    window.addEventListener('keydown', escape, true);
+    return () => window.removeEventListener('keydown', escape, true);
+  }, [recording, saving]);
   if (!settings) return <Dialog title="全局热键" close={close}><p>配置尚未加载。</p></Dialog>;
   const globalKeys = [...new Set([...(desktop.state?.engine?.hotkeyActions ?? []), ...Object.keys(settings.globalHotkeys)])].filter(key => key !== 'playClip' && key !== 'selectPreset' || key in settings.globalHotkeys);
   const rows: BindingRow[] = [
@@ -116,9 +181,8 @@ export function HotkeysDialog({ close }: { close(): void }) {
   function capture(event: KeyboardEvent<HTMLInputElement>) {
     event.preventDefault(); event.stopPropagation();
     if (event.key === 'Escape') { void cancelRecording().catch(failure => setError(errorMessage(failure))); return; }
-    if (['Control', 'Alt', 'Shift', 'Meta'].includes(event.key)) return;
+    if (['Control', 'Alt', 'Shift', 'Meta', 'AltGraph', 'OS', 'Super', 'Hyper', 'Fn', 'FnLock'].includes(event.key)) return;
     const modifiers = [event.ctrlKey ? 'Ctrl' : '', event.altKey ? 'Alt' : '', event.shiftKey ? 'Shift' : '', event.metaKey ? 'Win' : ''].filter(Boolean);
-    if (!modifiers.length) { setError('请使用包含 Ctrl / Alt / Shift / Win 的组合键。'); return; }
     const names: Record<string, string> = { ' ': 'Space', Backspace: 'Back', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', ';': 'Semicolon', ':': 'Semicolon', '=': 'Equal', '+': 'Equal', ',': 'Comma', '<': 'Comma', '-': 'Minus', '_': 'Minus', '.': 'Period', '>': 'Period', '/': 'Slash', '?': 'Slash', '`': 'Grave', '~': 'Grave', '[': 'BracketLeft', '{': 'BracketLeft', '\\': 'Backslash', '|': 'Backslash', ']': 'BracketRight', '}': 'BracketRight', "'": 'Quote', '"': 'Quote' };
     const keypad: Record<string, string> = { NumpadMultiply: 'NumMultiply', NumpadAdd: 'NumAdd', NumpadSubtract: 'NumSubtract', NumpadDecimal: 'NumDecimal', NumpadDivide: 'NumDivide' };
     const digit = /^Numpad([0-9])$/.exec(event.code);
@@ -136,13 +200,13 @@ export function HotkeysDialog({ close }: { close(): void }) {
     } catch (failure) { setError(errorMessage(failure)); }
     finally { setSaving(false); }
   }
-  return <Dialog title="全局热键与绑定状态" close={close}><p className="dialog-description">绑定由系统实际注册。无效或冲突配置保留，但不会激活；录制时只保留全部静音的分派。</p><div className="hotkey-list">{rows.map(row => {
+  return <Dialog title="全局热键与绑定状态" close={close}><p className="dialog-description">支持单个按键或 Ctrl / Alt / Shift / Win 组合键。单独按修饰键不会录入；Esc 取消录制。绑定由系统实际注册，无效或冲突配置保留但不激活；录制时只保留全部静音的分派。</p><div className="hotkey-list">{rows.map(row => {
     const issue = desktop.state?.engine?.hotkeyIssues.find(issue => issue.section === row.section && issue.key === row.key);
     const action = row.section === 'clipHotkeys' ? 'playClip' : row.section === 'presetHotkeys' ? 'selectPreset' : row.key;
     const target = row.section === 'globalHotkeys' ? null : row.key;
     const registered = desktop.state?.engine?.hotkeys.some(binding => binding.action === action && binding.targetId === target) ?? false;
     return <div className={issue ? 'invalid' : ''} key={`${row.section}:${row.key}`}><span><Icon name="keyboard" size={16} /><strong>{row.label}</strong><small>{issue?.reason ?? (settings[row.section][row.key] ? desktop.state?.engine ? (registered ? '已注册并激活' : '未激活') : '后端不可用，未激活' : '未绑定')}</small></span><kbd>{settings[row.section][row.key] || '—'}</kbd><Button disabled={!desktop.state?.engine || saving} onClick={() => { void begin(row).catch(failure => setError(errorMessage(failure))); }}>录制</Button><IconButton icon="close" label={`解绑${row.label}`} disabled={saving} onClick={() => { void saveBinding(row, null); }} /></div>;
-  })}</div>{recording && <div className="hotkey-recorder"><label className="form-field">正在录制：{recording.label}<input autoFocus aria-label="录制热键" readOnly placeholder="按下组合键，Esc 取消" value={gesture} onKeyDown={capture} /></label><div className="inline-actions"><Button onClick={() => { void cancelRecording().catch(failure => setError(errorMessage(failure))); }}>取消录制</Button><Button variant="primary" disabled={!gesture || saving} onClick={() => { void saveBinding(recording, gesture); }}>保存绑定</Button></div></div>}{error && <p className="inline-error" role="alert">{error}</p>}</Dialog>;
+  })}</div>{recording && <div className="hotkey-recorder"><label className="form-field">正在录制：{recording.label}<input autoFocus aria-label="录制热键" readOnly placeholder="按下单键或组合键，Esc 取消" value={gesture} onKeyDown={capture} /></label><div className="inline-actions"><Button onClick={() => { void cancelRecording().catch(failure => setError(errorMessage(failure))); }}>取消录制</Button><Button variant="primary" disabled={!gesture || saving} onClick={() => { void saveBinding(recording, gesture); }}>保存绑定</Button></div></div>}{error && <p className="inline-error" role="alert">{error}</p>}</Dialog>;
 }
 
 export function DiagnosticsDialog({ close }: { close(): void }) {
