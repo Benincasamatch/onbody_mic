@@ -259,6 +259,22 @@ public sealed class ClipLibraryTests : IDisposable
     }
 
     [Fact]
+    public void Direct_file_plans_keep_selection_order_without_creating_groups_or_decoding()
+    {
+        using var library = OpenLib();
+        var ten = SourceFile("10.WAV");
+        var two = SourceFile("2.mp3");
+        var plan = library.PrepareFolderImport([ten, two]);
+        Assert.Equal(new[] { ten, two }, plan.Files.Select(file => file.Path));
+        Assert.All(plan.Files, file => Assert.Null(file.GroupId));
+        Assert.Empty(plan.RootGroupIds);
+        Assert.Empty(library.GroupsSnapshot());
+        Assert.Empty(library.ItemsSnapshot());
+        Assert.Equal(0, _decoder.Calls);
+        Assert.False(File.Exists(Path.Combine(library.Root, "index.json")));
+    }
+
+    [Fact]
     public void Folder_plan_preserves_mixed_input_natural_depth_first_order_and_hierarchy_after_reopen()
     {
         var root = Path.Combine(_dir, "合集10");
@@ -307,7 +323,6 @@ public sealed class ClipLibraryTests : IDisposable
         Assert.Equal(plan.Files.Select(f => f.Path), reopened.Search(sort: ClipSortOrder.LibraryOrder).Select(c => c.OriginalImportPath));
         Assert.Equal(plan.Files.Length - 2, reopened.Search(groupId: rootGroup.GroupId).Count);
         var repeated = reopened.PrepareFolderImport([first, root, last]);
-        Assert.Equal(plan, repeated with { Files = plan.Files, RootGroupIds = plan.RootGroupIds });
         Assert.Equal(plan.Files, repeated.Files);
         Assert.Equal(plan.RootGroupIds, repeated.RootGroupIds);
         Assert.Equal(groups, reopened.GroupsSnapshot());

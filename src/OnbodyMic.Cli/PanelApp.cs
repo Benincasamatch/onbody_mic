@@ -119,7 +119,7 @@ internal static class PanelApp
             case "help":
                 Console.WriteLine("mic|extras|app on|off, bind app <pid|auto>, play|preview <库ID或文件路径>, stop,");
                 Console.WriteLine("monitor clip|full|off, gain mic|app|clip|monitor <v>, mute, unmute, status, metrics, auto on|off");
-                Console.WriteLine("import <文件> [--name 名] [--dup], clips [过滤] [--fav] [--group 组] [--sort name|time], search <词>");
+                Console.WriteLine("import <文件> [--name 名] [--dup], clips [过滤] [--fav] [--group ID或完整路径] [--sort name|time|libraryOrder], search <词>");
                 Console.WriteLine("fav|unfav <clipId>, rename <clipId> <名>, clipgain <clipId> <0..4>, del <clipId> [--force]");
                 Console.WriteLine("group add|rename|del|set ..., hotkeys, hotkey bind|unbind ..., cache [prefill], quit");
                 Console.WriteLine("presets, preset new|save|copy|rename|del|apply|restore");

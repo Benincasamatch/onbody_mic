@@ -380,7 +380,7 @@ public sealed class ClipLibrary : IDisposable
         foreach (var path in paths)
         {
             if (string.IsNullOrWhiteSpace(path)) throw new ClipImportException("import path must not be empty");
-            AddFolderEntry(Path.GetFullPath(path), -1, entries, seenPaths);
+            AddFolderEntry(Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)), -1, entries, seenPaths);
         }
 
         lock (_gate)
@@ -432,7 +432,8 @@ public sealed class ClipLibrary : IDisposable
     private static void AddFolderEntry(string path, int parentIndex, List<FolderEntry> entries, HashSet<string> seenPaths)
     {
         var attributes = File.GetAttributes(path);
-        if ((attributes & FileAttributes.ReparsePoint) != 0 || !seenPaths.Add(path)) return;
+        if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) == (FileAttributes.Directory | FileAttributes.ReparsePoint) ||
+            !seenPaths.Add(path)) return;
         if ((attributes & FileAttributes.Directory) == 0)
         {
             var extension = Path.GetExtension(path);
