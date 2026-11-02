@@ -17,8 +17,8 @@
 
 ### 验证
 
-- 218 项 .NET Release 测试、11 项 Rust 测试和 7 项 Node 版本比较测试全部通过；修复了文件夹导入测试在 Windows 上未规范化路径分隔符导致的误报。
-- `build-desktop.ps1 -Bundle` 实际生成 35.08 MiB 的 NSIS 安装程序和便携目录/ZIP；安装程序与便携包均包含 `OnbodyMic.EngineHost.exe`。
+- 219 项 .NET Release 测试（Media 32）、11 项 Rust 测试和 7 项 Node 版本比较测试全部通过；修复了文件夹导入测试在 Windows 上未规范化路径分隔符导致的误报。
+- `build-desktop.ps1 -Bundle` 实际生成约 35 MiB 的 NSIS 安装程序和便携目录/ZIP；安装程序与便携包均包含 `OnbodyMic.EngineHost.exe`。
 - 真实 Tauri 窗口验证：页脚显示 `v0.3.0`，关于面板读取到提交、提交时间、构建时间和 6 个 CHANGELOG 版本；自动检查真实 GitHub API 成功并显示“当前已是最新版本”。
 - 通过 CDP 注入模拟 Release v0.4.0 验证更新可用路径：主界面出现新版本横幅，关于面板显示远端说明；点击“下载安装程序”实际打开系统浏览器到 `setup.exe` 资产地址。未自动下载或安装。
 - 更新结果缓存在本地：在 12 小时检查窗口内重启并移除网络模拟后，主界面仍从缓存提醒 v0.4.0，不依赖重复请求。
