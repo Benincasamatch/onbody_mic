@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$Bundle)
+param([Alias('Installer')][switch]$Bundle)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $localCargo = Join-Path $repo '.tools\cargo\bin\cargo.exe'
@@ -58,6 +58,25 @@ try {
     Move-Item -LiteralPath $archive -Destination (Join-Path $dist "$name.zip")
     Write-Host "Native portable directory: $(Join-Path $dist $name)"
     Write-Host "Native portable archive: $(Join-Path $dist "$name.zip")"
+    if ($Bundle) {
+        $bundleDir = Join-Path $release 'bundle\nsis'
+        $installers = @(Get-ChildItem -LiteralPath $bundleDir -Filter '*.exe' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*$($config.version)*setup*" })
+        if ($installers.Count -eq 0) {
+            $installers = @(Get-ChildItem -LiteralPath $bundleDir -Filter '*.exe' -File -ErrorAction SilentlyContinue)
+        }
+        if ($installers.Count -eq 0) { throw "Missing NSIS installer output under $bundleDir" }
+        $installer = $installers | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        $installerBase = "OnbodyMic-$($config.version)-desktop-installer-x64"
+        $installerName = "$installerBase.exe"
+        $installerSuffix = 1
+        while (Test-Path -LiteralPath (Join-Path $dist $installerName)) {
+            $installerName = "$installerBase-$installerSuffix.exe"
+            $installerSuffix++
+        }
+        $installerTarget = Join-Path $dist $installerName
+        Copy-Item -LiteralPath $installer.FullName -Destination $installerTarget
+        Write-Host "Native NSIS installer: $installerTarget"
+    }
 }
 finally {
     Remove-Item -LiteralPath $stage -Recurse -Force
