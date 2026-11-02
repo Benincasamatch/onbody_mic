@@ -4,11 +4,12 @@ import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { Button, Dialog, Icon, IconButton } from './components';
 import { errorMessage, nativeRuntime } from './bridge';
-import type { AppInfo, BuildInfo, ReleaseNote, UpdateCheck } from './version';
+import type { AppInfo, BuildInfo, LatestRelease, ReleaseNote, UpdateCheck } from './version';
 import { fetchLatestRelease, formatStamp, toUpdateCheck } from './version';
 
 const CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const CHECKED_AT_KEY = 'onbodymic.update.checkedAt';
+const LATEST_KEY = 'onbodymic.update.latest';
 const DISMISSED_KEY = 'onbodymic.update.dismissed';
 
 function readStorage(key: string): string | null {
@@ -24,6 +25,23 @@ function readDismissed(): string[] {
     const parsed = JSON.parse(readStorage(DISMISSED_KEY) ?? '[]');
     return Array.isArray(parsed) ? parsed.filter(value => typeof value === 'string').slice(0, 20) : [];
   } catch { return []; }
+}
+
+function readCachedRelease(): LatestRelease | null {
+  try {
+    const parsed = JSON.parse(readStorage(LATEST_KEY) ?? 'null') as Partial<LatestRelease> | null;
+    if (!parsed || typeof parsed.tag_name !== 'string' || typeof parsed.html_url !== 'string') return null;
+    return {
+      tag_name: parsed.tag_name,
+      name: typeof parsed.name === 'string' ? parsed.name : null,
+      body: typeof parsed.body === 'string' ? parsed.body : null,
+      html_url: parsed.html_url,
+      published_at: typeof parsed.published_at === 'string' ? parsed.published_at : null,
+      prerelease: parsed.prerelease === true,
+      draft: parsed.draft === true,
+      assets: Array.isArray(parsed.assets) ? parsed.assets.filter(asset => asset && typeof asset.name === 'string' && typeof asset.browser_download_url === 'string').map(asset => ({ name: asset.name, browser_download_url: asset.browser_download_url, size: Number(asset.size) || 0 })) : [],
+    };
+  } catch { return null; }
 }
 
 export async function openExternal(url: string) {
@@ -42,6 +60,7 @@ export function useUpdater(currentVersion: string | undefined) {
     return Number.isFinite(value) && value > 0 ? value : null;
   });
   const [dismissed, setDismissed] = useState<string[]>(readDismissed);
+  const [cachedRelease] = useState<LatestRelease | null>(readCachedRelease);
   const running = useRef(false);
 
   useEffect(() => {
@@ -52,6 +71,11 @@ export function useUpdater(currentVersion: string | undefined) {
       .catch(failure => { if (!stopped) setInfoError(errorMessage(failure)); });
     return () => { stopped = true; };
   }, []);
+
+  useEffect(() => {
+    if (!info || update || !cachedRelease) return;
+    setUpdate(toUpdateCheck(cachedRelease, info.build.version || currentVersion || '0.0.0'));
+  }, [info, update, cachedRelease, currentVersion]);
 
   const checkNow = useCallback(async (manual = false) => {
     if (!info || running.current) return;
@@ -68,6 +92,7 @@ export function useUpdater(currentVersion: string | undefined) {
       setUpdate(result);
       setCheckedAt(result.checkedAt);
       writeStorage(CHECKED_AT_KEY, String(result.checkedAt));
+      writeStorage(LATEST_KEY, JSON.stringify(latest));
     } catch (failure) {
       if (manual) setError(errorMessage(failure));
     } finally {
