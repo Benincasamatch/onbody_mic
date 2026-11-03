@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent } from 'react';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { Button, ConfirmationDialog, Dialog, Icon, IconButton, Select } from './components';
+import type { IconName } from './icons';
 import { useDesktop } from './context';
 import { desktopCommand, errorMessage } from './bridge';
-import type { AppInstance, AudioDevice, ClipItem, HotkeySection, PresetApplyResult, PresetConfig, SettingsData } from './types';
+import type { AppInstance, AudioDevice, ClipItem, HotkeySection, PanelKind, PresetApplyResult, PresetConfig, SettingsData } from './types';
 import { descendantGroupIds, groupOptions, groupPath } from './library';
 import { AudioEditorDialog } from './AudioEditor';
 import type { ImportResult } from './types';
@@ -160,14 +161,20 @@ export function GroupsDialog({ close }: { close(): void }) {
 
 const actionLabels: Record<string, string> = { emergencyMute: '全部静音', stopClip: '停止音效', toggleMicSend: '真麦发送开关', toggleExtrasSend: '附加音频开关', toggleMonitor: '监听开关', playClip: '播放音效', selectPreset: '选择预设' };
 interface BindingRow { section: HotkeySection; key: string; label: string }
-export function HotkeysDialog({ close }: { close(): void }) {
+export function HotkeysDialog({ close, focusClipId }: { close(): void; focusClipId?: string }) {
   const desktop = useDesktop();
   const [recording, setRecording] = useState<BindingRow | null>(null);
   const [gesture, setGesture] = useState('');
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const listRef = useRef<HTMLDivElement>(null);
   const settings = desktop.state?.settings;
   useEffect(() => { return () => { void desktopCommand('hotkeys_suspend', { value: false }).catch(failure => desktop.notify(errorMessage(failure))); }; }, []);
+  useEffect(() => {
+    if (!focusClipId || !listRef.current) return;
+    const row = listRef.current.querySelector<HTMLElement>(`[data-clip-id="${CSS.escape(focusClipId)}"]`);
+    row?.scrollIntoView({ block: 'nearest' });
+  }, [focusClipId]);
   useEffect(() => {
     if (!recording) return;
     function escape(event: globalThis.KeyboardEvent) {
@@ -209,12 +216,12 @@ export function HotkeysDialog({ close }: { close(): void }) {
     } catch (failure) { setError(errorMessage(failure)); }
     finally { setSaving(false); }
   }
-  return <Dialog title="全局热键与绑定状态" close={close}><p className="dialog-description">支持单个按键或 Ctrl / Alt / Shift / Win 组合键。单独按修饰键不会录入；Esc 取消录制。绑定由系统实际注册，无效或冲突配置保留但不激活；录制时只保留全部静音的分派。</p><div className="hotkey-list">{rows.map(row => {
+  return <Dialog title="全局热键与绑定状态" close={close}><p className="dialog-description">支持单个按键或 Ctrl / Alt / Shift / Win 组合键。单独按修饰键不会录入；Esc 取消录制。绑定由系统实际注册，无效或冲突配置保留但不激活；录制时只保留全部静音的分派。</p><div className="hotkey-list" ref={listRef}>{rows.map(row => {
     const issue = desktop.state?.engine?.hotkeyIssues.find(issue => issue.section === row.section && issue.key === row.key);
     const action = row.section === 'clipHotkeys' ? 'playClip' : row.section === 'presetHotkeys' ? 'selectPreset' : row.key;
     const target = row.section === 'globalHotkeys' ? null : row.key;
     const registered = desktop.state?.engine?.hotkeys.some(binding => binding.action === action && binding.targetId === target) ?? false;
-    return <div className={issue ? 'invalid' : ''} key={`${row.section}:${row.key}`}><span><Icon name="keyboard" size={16} /><strong>{row.label}</strong><small>{issue?.reason ?? (settings[row.section][row.key] ? desktop.state?.engine ? (registered ? '已注册并激活' : '未激活') : '后端不可用，未激活' : '未绑定')}</small></span><kbd>{settings[row.section][row.key] || '—'}</kbd><Button disabled={!desktop.state?.engine || saving} onClick={() => { void begin(row).catch(failure => setError(errorMessage(failure))); }}>录制</Button><IconButton icon="close" label={`解绑${row.label}`} disabled={saving} onClick={() => { void saveBinding(row, null); }} /></div>;
+    return <div className={`${issue ? 'invalid' : ''} ${focusClipId && row.section === 'clipHotkeys' && row.key === focusClipId ? 'focused' : ''}`} key={`${row.section}:${row.key}`} data-clip-id={row.section === 'clipHotkeys' ? row.key : undefined}><span><Icon name="keyboard" size={16} /><strong>{row.label}</strong><small>{issue?.reason ?? (settings[row.section][row.key] ? desktop.state?.engine ? (registered ? '已注册并激活' : '未激活') : '后端不可用，未激活' : '未绑定')}</small></span><kbd>{settings[row.section][row.key] || '—'}</kbd><Button disabled={!desktop.state?.engine || saving} onClick={() => { void begin(row).catch(failure => setError(errorMessage(failure))); }}>录制</Button><IconButton icon="close" label={`解绑${row.label}`} disabled={saving} onClick={() => { void saveBinding(row, null); }} /></div>;
   })}</div>{recording && <div className="hotkey-recorder"><label className="form-field">正在录制：{recording.label}<input autoFocus aria-label="录制热键" readOnly placeholder="按下单键或组合键，Esc 取消" value={gesture} onKeyDown={capture} /></label><div className="inline-actions"><Button onClick={() => { void cancelRecording().catch(failure => setError(errorMessage(failure))); }}>取消录制</Button><Button variant="primary" disabled={!gesture || saving} onClick={() => { void saveBinding(recording, gesture); }}>保存绑定</Button></div></div>}{error && <p className="inline-error" role="alert">{error}</p>}</Dialog>;
 }
 
@@ -237,6 +244,16 @@ function DuplicateImportDialog() {
     finally { guard.current = false; setPending(false); }
   }
   return <Dialog title="发现重复音效" close={() => { void resolve(false); }} pending={pending}><p>音效库已有相同内容。跳过不会修改现有条目；继续将创建独立副本，并保留目标分组。处理后继续下一项。</p><code className="path-text">{desktop.duplicatePath}</code>{error && <p className="inline-error" role="alert">{error}</p>}<div className="dialog-actions"><Button disabled={pending} onClick={desktop.cancelImports}>取消剩余导入</Button><Button disabled={pending} onClick={() => { void resolve(false); }}>跳过此文件</Button><Button variant="primary" disabled={pending} onClick={() => { void resolve(true); }}>{pending ? '正在处理…' : '仍创建新副本'}</Button></div></Dialog>;
+}
+
+export function SettingsDialog({ close, open }: { close(): void; open(kind: PanelKind): void }) {
+  const entries: { kind: PanelKind; icon: IconName; title: string; desc: string }[] = [
+    { kind: 'presets', icon: 'presets', title: '预设管理', desc: '创建、重命名、删除预设' },
+    { kind: 'devices', icon: 'settings', title: '设备设置', desc: '麦克风、虚拟输出、监听耳机与增益' },
+    { kind: 'hotkeys', icon: 'keyboard', title: '全局热键', desc: '发送、监听、静音等快捷键' },
+    { kind: 'diagnostics', icon: 'activity', title: '诊断与状态', desc: '引擎状态、采样峰值与数据位置' },
+  ];
+  return <Dialog title="设置" close={close}><div className="settings-grid">{entries.map(entry => <button key={entry.kind} type="button" className="settings-entry" onClick={() => { open(entry.kind); }}><Icon name={entry.icon} size={19} /><span><strong>{entry.title}</strong><small>{entry.desc}</small></span></button>)}</div></Dialog>;
 }
 
 export function PendingDialogs() {
