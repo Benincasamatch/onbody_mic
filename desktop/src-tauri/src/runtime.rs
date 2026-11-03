@@ -381,7 +381,7 @@ impl DesktopRuntime {
     fn apply_transparency(&self) {
         let reduced = self.store.lock().expect("configuration store poisoned").settings().ui.reduce_transparency;
         if let Some(window) = self.app.get_webview_window("main") {
-            let effect = if reduced { None } else { Some(EffectsBuilder::new().effect(Effect::Mica).build()) };
+            let effect = if reduced { None } else { Some(EffectsBuilder::new().effect(Effect::Acrylic).build()) };
             if let Err(error) = window.set_effects(effect) {
                 if let Err(fallback) = window.set_background_color(Some(tauri::window::Color(16, 17, 20, 255))) { self.notice("Info", fallback.to_string()); }
                 self.notice("Info", format!("系统透明材质不可用，使用不透明窗口: {error}"));

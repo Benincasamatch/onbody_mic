@@ -8,7 +8,25 @@
 
 正式程序已实现于 `desktop/`：Tauri 原生窗口与托盘、React/TypeScript 音效台、Rust 配置/预设存储，以及独立的 C# 音频后端。真实设备选择、应用绑定、素材导入/重复确认、分组/收藏/详情、试听/发送、热键和诊断均走实际命令链路，不复用预览中的模拟状态。
 
-原生窗口使用 Tern · Stencil 深色分层、克制的紫色强调与可关闭的玻璃效果；收起导航/混音栏及小窗口滚动保留核心按钮可达。版本、构建入口与验证限制见 [README](../README.md) 和 [验证记录 §10](07-validation-and-handoff.md#10-原生音效台局部-rust-迁移的本地验证)。浏览器采集/裁剪仍仅为 P5 计划。
+原生窗口使用 Tern · Stencil 深色分层、克制的紫色强调；收起导航/混音栏及小窗口滚动保留核心按钮可达。版本、构建入口与验证限制见 [README](../README.md) 和 [验证记录 §10](07-validation-and-handoff.md#10-原生音效台局部-rust-迁移的本地验证)。浏览器采集/裁剪仍仅为 P5 计划。
+
+### 液态玻璃视觉系统（2026-11-03）
+
+按用户提供的《液态玻璃（Liquid Glass）效果设计参考》改造 `desktop/src/styles.css`，改版日志见 [devlog/2026-11-03](../devlog/2026-11-03-liquid-glass-frontend.md)。
+
+- 保真层级采用 **L1 视觉模拟 + L2 位移折射（SVG `feDisplacementMap`）**；不引入 WebGL/WebGPU 管线。
+- **材质分层**：窗口为半透明底色 + 独立氛围层（`z-index:-1` 的中性白色径向渐变，让模糊有可见来源）；顶栏/侧栏/混音栏/播放条为雾面玻璃（`blur(26px) saturate(1.85)` + 半透明染色 + 顶部高光 + 内侧描边），状态栏为薄玻璃；对话框、sticky 标题、下拉选单、提示条为更厚的弹出玻璃并带位移折射。
+- **玻璃只用于功能层**，内容卡片（音效卡/路由卡/预览行/指标卡）保持实体材质，只统一描边、圆角与顶部高光，避免削弱内容层级。
+- 令牌集中在 `:root`（`--glass-*`、`--face*`、`--bevel-*`、`--radius-*`），折射滤镜定义在 `App.tsx` 的 `<svg class="glass-defs">` 中；降级路径为“普通 `blur()` 声明在前、`url(#filter)` 声明在后”的层叠回落，外加 `@supports not (backdrop-filter: blur(1px))` 的整片不透明回落。
+- `settings.ui.reduceTransparency`（界面上的“切换透明材质”）在关闭玻璃时禁用全部 `backdrop-filter`、隐藏氛围层并把各玻璃面改为不透明纯色。
+- 验证：Chromium/Edge 156 与真实 WebView2（同版本）上确认计算样式与折射生效、三档窗口尺寸无横向溢出、纯白桌面下主文字对比度 ≥11:1；限制（真实桌面合成、GPU 依赖、明亮桌面下次级文字 3.5:1）记于改版日志。
+- **基调**：窗口底色为纯黑（无紫/蓝色偏），主要文字为紫色族（保亮度换色相映射，对比度不变），语义色（红/琥珀/绿）保持不变。
+- **平面 3D**：卡片、按钮、开关、滑块、清单项改为“纯色面 + 顶部受光高光 + 底部挤出暗边”，按下时下陷；输入类为内凹槽面。玻璃仅保留在导航/工具栏/弹层等功能层（`--face*`、`--bevel-*` 令牌）。
+- **窗口磨砂**：系统材质由 Tauri 内置 `Effect::Acrylic`（DWM `SYSTEMBACKDROP_TYPE=3`）提供，取代原先的 `Effect::Mica`（按壁纸取色、不模糊窗后内容）；CSS 侧为 `rgba(0,0,0,.66)` 半透明底 + `backdrop-filter:blur(30px)`。透明 WebView2 窗口中 CSS 无法磨砂系统桌面（WebView2 issue #4945；Chromium 的 `backdrop-filter` 限于页面 backdrop root），因此真实桌面磨砂只能来自系统材质。无需新增依赖。
+- **平面化**：交付 CSS 中不含任何 `gradient`；凸起面为纯色 + 顶部内高光 + 底部挤出暗边，凹槽面为纯色 + 内部上阴影。
+- **多色层级**：主要文字保留紫色族（亮色段）；次要/说明文字为中性冷灰（220°、等亮度映射，对比度不变）；强调色 `--accent-cyan`/`--accent-blue` 用于小标题、波形图标、链接，四路音频按链路分色（真麦青 / 应用蓝 / 附加琥珀 / 监听绿），收藏星为琥珀。
+- **透明度分层**：窗口 `rgba(0,0,0,.66)` < 卡片 `rgba(26,26,26,.82)` < 按钮/输入不透明（`#212121`/`#0d0d0d`）。
+- **构建**：`desktop/src-tauri/Cargo.toml` 未声明 `custom-protocol` feature，因此 `cargo build --release` 是 dev 模式（加载 `devUrl`、不嵌入 `frontendDist`）；生产嵌入用 `cargo build --release --features tauri/custom-protocol` 或项目的 `npm run tauri -- build`。
 
 选型阶段的独立 `design-preview/` 保留三种可切换布局，作为设计比较资料：
 
