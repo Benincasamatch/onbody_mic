@@ -2,11 +2,11 @@
 
 Windows 游戏语音音频面板：把真实麦克风、指定应用进程树和导入音效混合后送入虚拟音频线缆，供 KOOK 等语音软件选作输入；支持独立本地试听、监听、热键和预设。
 
-当前本地交付版本 **0.3.0**：正式桌面端为 **Tauri 2 + React/TypeScript 音效台**，Rust 负责配置、预设和原生壳；C#/.NET 10 继续负责真实音频、素材库和系统热键，通过随包的无界面后端运行。安装程序与便携包见 [Releases](https://github.com/Benincasamatch/onbody_mic/releases)。版本历史见 [CHANGELOG](CHANGELOG.md)，发布与提交规范见[版本、提交与发布规范](docs/11-versioning-and-release.md)，本轮实测与限制见[验证记录](docs/07-validation-and-handoff.md)。
+当前本地交付版本 **0.4.0**：正式桌面端为 **Tauri 2 + React/TypeScript 音效台**，Rust 负责配置、预设和原生壳；C#/.NET 10 继续负责真实音频、素材库和系统热键，通过随包的无界面后端运行。安装程序与便携包见 [Releases](https://github.com/Benincasamatch/onbody_mic/releases)。版本历史见 [CHANGELOG](CHANGELOG.md)，发布与提交规范见[版本、提交与发布规范](docs/11-versioning-and-release.md)，本轮实测与限制见[验证记录](docs/07-validation-and-handoff.md)与[界面改版日志](devlog/2026-11-03-liquid-glass-frontend.md)。
 
 ## 运行
 
-安装版运行 `OnbodyMic-0.3.0-desktop-installer-x64.exe`，按当前用户安装；升级会保留 `%LOCALAPPDATA%\OnbodyMic` 下的设置、预设和素材。便携版解压 `OnbodyMic-0.3.0-desktop-portable-x64.zip`，打开 `win-x64/onbodymic-desktop.exe`。同目录的 `OnbodyMic.EngineHost.exe` 是自动启动的音频后端，不要单独运行或删除。两种包都自带 .NET 运行时；Windows 需有 **Microsoft Edge WebView2 Runtime**，仅安装 Edge 浏览器不能代替运行时检查。
+安装版运行 `OnbodyMic-0.4.0-desktop-installer-x64.exe`，按当前用户安装；升级会保留 `%LOCALAPPDATA%\OnbodyMic` 下的设置、预设和素材。便携版解压 `OnbodyMic-0.4.0-desktop-portable-x64.zip`，打开 `win-x64/onbodymic-desktop.exe`。同目录的 `OnbodyMic.EngineHost.exe` 是自动启动的音频后端，不要单独运行或删除。两种包都自带 .NET 运行时；Windows 需有 **Microsoft Edge WebView2 Runtime**，仅安装 Edge 浏览器不能代替运行时检查。
 
 需要 Windows x64 和已安装的虚拟音频线缆。本项目历史实机路线为 **Steam Streaming Speakers**，程序不附带或安装驱动。Windows 11 以外系统、其他虚拟驱动和蓝牙组合未验证。
 
