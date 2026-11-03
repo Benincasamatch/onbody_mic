@@ -2,6 +2,37 @@
 
 所有显著变更按版本记录。格式参考 Keep a Changelog；本项目版本号独立于文档基线版本（文档 v1.x 见 docs/04）。
 
+## [0.6.0] - 2026-11-03
+
+磨砂玻璃界面重构。核心是纠正玻璃效果的实现架构：实测证实透明 WebView2 窗口中 CSS `backdrop-filter` 完全失效（WebView2 issue #4945，页面根之外的桌面像素不参与 backdrop root），真实磨砂只能来自系统 Acrylic 材质；因此移除全部失效的 backdrop-filter 死代码与 SVG 位移折射滤镜，改为**系统 Acrylic（磨砂来源）+ CSS 半透明分层（透射控制）**。
+
+### 新增
+
+- **独立玻璃测试工程**（独立于本仓库的 `glass-test` 项目）：最小 Tauri 2 透明窗口，验证 Acrylic 磨砂与 CSS 透明分层的真实效果；实测证实透明 WebView2 窗口中 CSS `backdrop-filter` 完全失效，真实磨砂只能来自系统 Acrylic。
+
+### 变更
+
+- **窗口底** `rgba(0,0,0,.66)` → `rgba(0,0,0,.35)`，桌面透射明显增强。
+- **顶栏** 54px → 40px 浏览器工具栏式（品牌 + 居中拖拽区 + 右侧功能按钮），背景 `rgba(0,0,0,.30)`；右侧按钮实色 `#322E39`（不参与半透明）。
+- **侧栏 / 主区 / 混音栏** 由 grid 三列改为 flex 独立圆角矩形面板（圆角 14px、间隔 6px、顶部内高光 + 投影），背景统一 `rgba(0,0,0,.65)`。
+- **底栏** 黑色半透明 `rgba(0,0,0,.30)`。
+- **按钮完全平面化**：删除全部 bevel 高光、底部暗边、按压位移（`.button`/`.icon-button`/侧栏导航/卡片操作/应用选择器），hover/active 只变背景色。
+- **删除全部失效 `backdrop-filter`**（13 处 → 0）：顶栏/侧栏/混音栏/主区/播放条/状态栏/对话框/对话框头/背板/选单/提示条/按钮。
+- **删除 SVG 位移折射滤镜**（`App.tsx` `glass-defs` 与 `#lg-refract`/`#lg-refract-soft`）——依赖失效 backdrop-filter，属死代码。
+- 删除死令牌 `--glass-blur`/`--glass-blur-strong`/`--glass-saturate`/`--glass-chrome`；媒体查询内 8 处 grid 列宽规则改为面板宽度控制；折叠/隐藏状态改宽度/display 控制。
+- 保留：`data-effects='reduced'`（设置"切换透明材质"开关，Rust 切 `Effect::None` + CSS 不透明回退）与 `@supports not (backdrop-filter)` 降级分支。
+
+### 验证
+
+- 前端 `tsc --noEmit` + vite build 通过；`cargo build --release --features tauri/custom-protocol` 通过。
+- 真实 Tauri + WebView2 156（CDP `getComputedStyle`）：窗口底 `rgba(0,0,0,.35)`、顶栏 `rgba(0,0,0,.30)`、面板 `rgba(0,0,0,.65)` + 圆角 14px、底栏 `rgba(0,0,0,.30)`、顶栏右侧按钮 `rgb(50,46,57)`（#322E39）；全页面 `backdrop-filter` 计数 0；`glass-defs`/`filter` 元素 0；面板间隔 6px、顶栏高 40px。
+- 系统 Acrylic 生效确认：`DwmGetWindowAttribute(hwnd, 38)` = 3（`DWMWA_SYSTEMBACKDROP_TYPE` Acrylic）。
+- 测试工程实测：透明窗口下带 `blur(26px)+url(#refract)` 的面板内部纹理方差**高于**面板外——CSS 模糊在透明窗口未发生（与 WebView2 #4945 一致）。
+
+### 已知限制
+
+- 透明窗口的合成截图（CopyFromScreen/PrintWindow/CDP）对透明区域不可靠，真实观感需人眼确认；Acrylic 在窗口拖动/缩放时性能偏差（Win10 1903+ 与部分 Win11 构建）；多显示器不同缩放下的材质表现未测。
+
 ## [0.5.0] - 2026-11-03
 
 按界面反馈批注实施布局精简与真实波形展示。核心是音效卡从"静态图标"改为**真实波形**（导入时从已解码样本计算并持久化到音效库索引），播放中的卡片带扫光动效。其余为批注驱动的界面清理。

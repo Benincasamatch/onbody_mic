@@ -56,20 +56,6 @@ export default function App() {
   function openPanel(kind: PanelKind | 'settings') { setPresetEditing(undefined); setPanel(kind); }
 
   return <div className={`app-window soundboard ${sidebarCollapsed ? 'sidebar-collapsed' : ''} ${mixerVisible ? '' : 'mixer-hidden'}`} data-effects={desktop.state?.settings.ui.reduceTransparency ? 'reduced' : 'glass'}>
-    <svg className="glass-defs" aria-hidden="true" focusable="false">
-      <defs>
-        <filter id="lg-refract" x="-25%" y="-25%" width="150%" height="150%" colorInterpolationFilters="sRGB">
-          <feTurbulence type="fractalNoise" baseFrequency="0.006 0.009" numOctaves="2" seed="7" result="noise" />
-          <feGaussianBlur in="noise" stdDeviation="4" result="smoothed" />
-          <feDisplacementMap in="SourceGraphic" in2="smoothed" scale="22" xChannelSelector="R" yChannelSelector="G" />
-        </filter>
-        <filter id="lg-refract-soft" x="-25%" y="-25%" width="150%" height="150%" colorInterpolationFilters="sRGB">
-          <feTurbulence type="fractalNoise" baseFrequency="0.016 0.022" numOctaves="2" seed="3" result="noise" />
-          <feGaussianBlur in="noise" stdDeviation="2.5" result="smoothed" />
-          <feDisplacementMap in="SourceGraphic" in2="smoothed" scale="12" xChannelSelector="R" yChannelSelector="G" />
-        </filter>
-      </defs>
-    </svg>
     <WindowHeader onCreatePreset={() => { setPresetEditing(null); setPanel('devices'); }}><IconButton icon={sidebarCollapsed ? 'expand' : 'collapse'} label={sidebarCollapsed ? '展开分类导航' : '收起分类导航'} active={!sidebarCollapsed} onClick={() => setSidebarCollapsed(current => !current)} aria-expanded={!sidebarCollapsed} /><IconButton icon="sliders" label={mixerVisible ? '收起发送与监听' : '显示发送与监听'} active={mixerVisible} onClick={() => setMixerVisible(current => !current)} aria-expanded={mixerVisible} /></WindowHeader>
     <div className="soundboard-body"><aside className="soundboard-sidebar" aria-label="分类与管理"><div className="sidebar-heading"><span className="eyebrow">YOUR COLLECTION</span><h2>声音收藏夹</h2><p>常用声音，随时在手边</p></div><nav className="category-nav" aria-label="音效分类"><button type="button" aria-label="全部音效" className={!desktop.favoritesOnly && !desktop.groupId ? 'selected' : ''} onClick={() => { desktop.setFavoritesOnly(false); desktop.setGroupId(null); }}><Icon name="audio" size={17} /><span>全部音效</span><small>{clips.length}</small></button><button type="button" aria-label="我的收藏" className={desktop.favoritesOnly ? 'selected' : ''} onClick={() => { desktop.setFavoritesOnly(true); desktop.setGroupId(null); }}><Icon name="star" size={17} /><span>我的收藏</span><small>{clips.filter(clip => clip.favorite).length}</small></button><GroupNavigation /></nav><div className="sidebar-note"><Icon name="settings" size={16} /><button type="button" className="settings-button" onClick={() => openPanel('settings')}><span>打开设置</span></button></div></aside>
     <main className="soundboard-main"><div className="page-heading"><div><span className="eyebrow">SOUNDBOARD / QUICK ACCESS</span><h1>{title}</h1>{selectedGroup ? <nav className="group-breadcrumbs" aria-label="当前分组路径"><button type="button" onClick={() => desktop.setGroupId(null)}>全部音效</button>{groupPath(groups, selectedGroup.groupId).map(group => <span key={group.groupId}><span aria-hidden="true">/</span><button type="button" aria-current={group.groupId === selectedGroup.groupId ? 'page' : undefined} onClick={() => desktop.setGroupId(group.groupId)}>{group.name}</button></span>)}</nav> : <p>本地试听与对外发送清楚分开。</p>}</div><IconButton icon="sliders" label="切换透明材质" active={!desktop.state?.settings.ui.reduceTransparency} disabled={!desktop.state} onClick={() => { void desktop.perform('set_transparency', { reduced: !desktop.state?.settings.ui.reduceTransparency }).catch(() => undefined); }} /></div>
