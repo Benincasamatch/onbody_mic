@@ -7,6 +7,7 @@ TestResults/
 packages/
 artifacts/
 dist/
+.edithere/
 *.user
 *.suo
 node_modules/

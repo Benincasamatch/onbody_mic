@@ -23,10 +23,28 @@
 
 - `npm --prefix desktop run build`（`tsc --noEmit` + vite）通过；Rust 13 项、Node 7 项测试通过；交付 CSS 中 `gradient` 出现 0 次。
 - 真实窗口 DWM 属性实测：`DWMWA_SYSTEMBACKDROP_TYPE = 3`（亚克力）、`DWMWA_USE_IMMERSIVE_DARK_MODE = 1`。
-- 真实合成画面（用户桌面 + 125% 缩放）取色：窗口底 `(23,22,20)`、顶栏 `(19,19,17)`、侧栏 `(18,18,17)`、混音栏 `(23,22,21)`；主文字对比度 14.7:1、次级 4.5:1（AA 达标）；各玻璃面高频纹理近 0（背景被材质压平，无清晰桌面细节透过）。
+- 真实合成画面（用户界面 + 125% 缩放）取色：窗口底 `(23,22,20)`、顶栏 `(19,19,17)`、侧栏 `(18,18,17)`、混音栏 `(23,22,21)`；主文字对比度 14.7:1、次字 4.5:1（AA 达标）；各玻璃面高频纹理趋 0（背景被材质压平，无清晰桌面细节透过）。
 - Chromium/Edge 156 与真实 Tauri/WebView2（同版本）确认计算样式与折射生效；真实窗口内打开设备对话框与切换透明材质来回均正常。
-- 1320×860 / 1000×760 / 760×640 无横向溢出，“全部静音”可达；纯白桌面（无系统材质时）主文字对比度 ≥11:1。
+- 1320×860 / 1000×760 / 760×640 无横向溢出，"全部静音"可达；纯白桌面（无系统材质时）主文字对比度 ≥ 1:1。
 - **构建方式更正**：本仓 `desktop/src-tauri/Cargo.toml` 未声明 `custom-protocol` feature，`cargo build --release` 产出的是 **dev 模式**二进制（加载 `devUrl`、不嵌入 `frontendDist`）；生产嵌入需 `cargo build --release --features tauri/custom-protocol`（或项目的 `npm run tauri -- build`）。已实测：前者加载 `http://127.0.0.1:1425/`，后者加载 `http://tauri.localhost/`。细节与限制见 [devlog](devlog/2026-11-03-liquid-glass-frontend.md) 与 [界面方案](docs/09-ui-modernization-plan.md)。
+
+## [0.4.1] - 2026-11-03
+
+按 EditHere 主界面批注反馈整理设置入口与状态呈现（`desktop/src/App.tsx`、`components.tsx`、`dialogs.tsx`、`styles.css`）。交互与命令契约未改。
+
+### 变更
+
+- 侧栏管理区 4 个独立入口（预设管理/设备设置/全局热键/诊断与状态）合并为单一"设置"入口，新增统一"设置"对话框（`SettingsDialog`）分项跳转；侧栏底部"只有明确开启的声音…"提示改为"打开设置"按钮。
+- 右上角删除重复的"设备与预设配置"图标按钮（侧栏已有入口）；两个收起/展开按钮逻辑统一（分类导航按钮补齐 `active` 高亮，与发送监听按钮一致）；"全部静音"保留。
+- footer 删除"状态不代表 KOOK 或远端已收到"提示；发送状态改为语义色：开启 `--success` 绿、关闭 `--error` 红、异常/后端不可用保持 `--warning` 琥珀。
+- 音效卡片：单击卡片主体打开详情对话框（原仅选中），双击保持播放；卡片快捷入口强化——未绑定显示"快捷"图标按钮，点击直接打开全局热键对话框并滚动聚焦该音效行（`HotkeysDialog` 新增 `focusClipId`）。
+- 收藏按钮收藏态改为实心填充高亮（原 alpha 0.16 几乎不可见）。
+
+### 验证
+
+- `npx tsc --noEmit` 与 `npm run build` 通过。
+- tauri dev 真实窗口：设置入口、设置对话框 4 项跳转、footer 状态 class、header 按钮数量均按预期；无渲染错误。
+
 
 ## [0.3.0] - 2026-11-02
 
