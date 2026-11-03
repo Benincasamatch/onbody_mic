@@ -97,13 +97,14 @@ internal sealed class MonitorPreferencesData
 internal sealed record ClipItemData(
     string ClipId, string DisplayName, string ManagedAssetPath, string? OriginalImportPath,
     int DurationMs, string Format, bool Favorite, string? GroupId, float Gain,
-    long ImportUnixMs, bool Available, ClipOriginData? Origin = null)
+    long ImportUnixMs, bool Available, ClipOriginData? Origin = null, float[]? Peaks = null)
 {
     public static ClipItemData FromDomain(ClipItem item, ClipLibrary library) => new(
         item.ClipId, item.DisplayName, item.ManagedAssetPath, item.OriginalImportPath,
         item.DurationMs, item.Format, item.Favorite, item.GroupId, item.Gain,
         item.ImportUnixMs, File.Exists(library.AssetAbsolutePath(item)),
-        item.Origin is { } origin ? ClipOriginData.FromDomain(origin) : null);
+        item.Origin is { } origin ? ClipOriginData.FromDomain(origin) : null,
+        item.WaveformPeaks.Length > 0 ? item.WaveformPeaks : null);
 }
 
 internal sealed record ClipOriginData(string Kind, string? ParentClipId, string OriginalPath, int StartMs, int EndMs)

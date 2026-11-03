@@ -14,7 +14,30 @@ public sealed record ClipItem(
     string? GroupId,
     float Gain,
     long ImportUnixMs,
-    ClipOrigin? Origin = null);
+    ClipOrigin? Origin = null,
+    float[]? Peaks = null)
+{
+    /// <summary>Waveform min/max bins (<c>[min0, max0, …]</c>) computed at import; empty for legacy entries.</summary>
+    public float[] WaveformPeaks => Peaks ?? [];
+
+    public bool Equals(ClipItem? other) =>
+        other is not null &&
+        ClipId == other.ClipId && DisplayName == other.DisplayName &&
+        ManagedAssetPath == other.ManagedAssetPath && OriginalImportPath == other.OriginalImportPath &&
+        DurationMs == other.DurationMs && Format == other.Format && Favorite == other.Favorite &&
+        GroupId == other.GroupId && Gain == other.Gain && ImportUnixMs == other.ImportUnixMs &&
+        Equals(Origin, other.Origin) && WaveformPeaks.AsSpan().SequenceEqual(other.WaveformPeaks);
+
+    public override int GetHashCode()
+    {
+        var hash = new HashCode();
+        hash.Add(ClipId); hash.Add(DisplayName); hash.Add(ManagedAssetPath); hash.Add(OriginalImportPath);
+        hash.Add(DurationMs); hash.Add(Format); hash.Add(Favorite); hash.Add(GroupId);
+        hash.Add(Gain); hash.Add(ImportUnixMs); hash.Add(Origin);
+        foreach (var peak in WaveformPeaks) hash.Add(peak);
+        return hash.ToHashCode();
+    }
+}
 
 public sealed record ClipGroup(string GroupId, string Name, string? ParentGroupId = null);
 

@@ -132,6 +132,11 @@ public sealed class ClipLibrary : IDisposable
                     throw new ClipLibraryLoadException($"item {dto.ClipId}: inconsistent trimmed origin");
             }
 
+            if (dto.Peaks is not null && (dto.Peaks.Length == 0 || dto.Peaks.Length % 2 != 0 || dto.Peaks.Length > WaveformPeaks.MaxBins * 2))
+                throw new ClipLibraryLoadException($"item {dto.ClipId}: invalid waveform peaks");
+            if (dto.Peaks is not null && dto.Peaks.Any(peak => !float.IsFinite(peak) || peak is < -1f or > 1f))
+                throw new ClipLibraryLoadException($"item {dto.ClipId}: waveform peaks out of range");
+
             items.Add(new ClipItem(
                 dto.ClipId,
                 dto.DisplayName,
@@ -143,7 +148,8 @@ public sealed class ClipLibrary : IDisposable
                 dto.GroupId,
                 dto.Gain,
                 dto.ImportUnixMs,
-                dto.Origin));
+                dto.Origin,
+                dto.Peaks));
         }
 
         var groups = new List<ClipGroup>(document.Groups.Count);
@@ -352,7 +358,8 @@ public sealed class ClipLibrary : IDisposable
                     GroupId: groupId,
                     Gain: 1f,
                     DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                    origin);
+                    origin,
+                    WaveformPeaks.Compute(decoded.Samples));
 
                 try
                 {
@@ -789,6 +796,7 @@ public sealed class ClipLibrary : IDisposable
                 Gain = i.Gain,
                 ImportUnixMs = i.ImportUnixMs,
                 Origin = i.Origin,
+                Peaks = i.WaveformPeaks.Length > 0 ? i.WaveformPeaks : null,
             })],
             Groups = [.. _groups.Select(g => new ClipGroupDto { GroupId = g.GroupId, Name = g.Name, ParentGroupId = g.ParentGroupId })],
         };
@@ -934,6 +942,8 @@ public sealed class ClipLibrary : IDisposable
         public long ImportUnixMs { get; set; }
 
         public ClipOrigin? Origin { get; set; }
+
+        public float[]? Peaks { get; set; }
     }
 
     private sealed class ClipGroupDto

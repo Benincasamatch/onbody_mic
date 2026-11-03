@@ -57,6 +57,7 @@ export interface ClipItem {
   importUnixMs: number;
   available: boolean;
   origin?: ClipOrigin | null;
+  peaks?: number[] | null;
 }
 export interface ClipGroup { groupId: string; name: string; parentGroupId: string | null }
 export interface AudioDevice { id: string; friendlyName: string; dataFlow: 'Render' | 'Capture'; state: string; isDefault: boolean }

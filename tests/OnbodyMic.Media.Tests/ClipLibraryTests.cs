@@ -1082,6 +1082,57 @@ public sealed class ClipLibraryTests : IDisposable
         Assert.True(File.Exists(wav));
         Assert.True(File.Exists(mp3));
     }
+
+    [Fact]
+    public void Import_computes_waveform_peaks_from_decoded_samples_and_persists_them()
+    {
+        var samples = new float[4410];
+        for (var i = 0; i < samples.Length; i++)
+        {
+            var phase = 2 * Math.PI * 440 * i / 44100;
+            samples[i] = (float)(0.8 * Math.Sin(phase));
+        }
+        _decoder.Generator = _ => samples;
+        var source = SourceFile("peaks.wav");
+
+        using (var library = OpenLib())
+        {
+            var item = library.Import(source).Item;
+            Assert.True(item.WaveformPeaks.Length > 0);
+            Assert.Equal(0, item.WaveformPeaks.Length % 2);
+            Assert.All(item.WaveformPeaks, peak => Assert.InRange(peak, -1f, 1f));
+            // Uniform sine: bins collectively must capture the real swing.
+            Assert.True(item.WaveformPeaks.Max() > 0.5f);
+            Assert.True(item.WaveformPeaks.Min() < -0.5f);
+        }
+
+        using (var reopened = OpenLib())
+        {
+            var item = reopened.Find(reopened.ItemsSnapshot().Single().ClipId)!;
+            Assert.Equal(2048, item.WaveformPeaks.Length / 2);
+            Assert.True(item.WaveformPeaks.Max() > 0.5f);
+            Assert.True(item.WaveformPeaks.Min() < -0.5f);
+        }
+    }
+
+    [Fact]
+    public void WaveformPeaks_Compute_bins_and_clamps_like_the_editor()
+    {
+        var flat = new float[1000];
+        Array.Fill(flat, 0.5f);
+        var peaks = WaveformPeaks.Compute(flat);
+        Assert.Equal(1000, peaks.Length / 2);
+        Assert.All(peaks, peak => Assert.Equal(0.5f, peak, precision: 5));
+
+        var loud = new float[100];
+        Array.Fill(loud, 2f);
+        var clamped = WaveformPeaks.Compute(loud);
+        Assert.All(clamped, peak => Assert.Equal(1f, peak));
+
+        Assert.Empty(WaveformPeaks.Compute([]));
+        var shortPeaks = WaveformPeaks.Compute(new float[3] { -1f, 0f, 1f }, maxBins: 10);
+        Assert.Equal(6, shortPeaks.Length);
+    }
 }
 
 public sealed class ClipCacheTests
