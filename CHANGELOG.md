@@ -2,6 +2,32 @@
 
 所有显著变更按版本记录。格式参考 Keep a Changelog；本项目版本号独立于文档基线版本（文档 v1.x 见 docs/04）。
 
+## [0.4.0] - 2026-11-03
+
+前端按液态玻璃（Liquid Glass）设计参考改造：`desktop/src/styles.css`、`desktop/src/components.tsx`（`data-route` 分色）、`desktop/src-tauri/src/runtime.rs`（系统材质 Mica→Acrylic）与 `desktop/src/App.tsx`（SVG 折射滤镜）。音频、配置、命令契约与既有行为未改。
+
+### 变更
+
+- 玻璃从“半透明纯色”改为真实材质：窗口改为半透明底色 + 独立氛围层，顶栏/侧栏/混音栏/播放条统一 `backdrop-filter` 雾面玻璃（模糊 + 饱和度 + 顶部高光 + 内侧描边），状态栏为薄玻璃；内容卡片保持实体材质但统一描边、圆角与顶部高光。
+- 对话框、sticky 标题、下拉选单与提示条增加 SVG `feTurbulence`+`feDisplacementMap` 位移折射（背景真实扭曲，不只是模糊）；不支持时按层叠顺序回落到普通模糊，另加 `@supports` 整片不透明降级。
+- 窗口底色改为纯黑并去掉紫/蓝色偏（原先的四组彩色氛围渐变换成中性白色渐变）；玻璃染色与各处近黑背景统一为中性灰阶。
+- 主要文字改为紫色族：以“保亮度换色相”把 70 个中性/蓝灰文字色（126 处）映射到 262° 紫色族，实测对比度与映射前一致；语义色（红/琥珀/绿）与既有的紫色强调保持原样。
+- 卡片、按钮改为“平面 3D”：纯色面 + 顶部受光高光 + 底部挤出暗边，按下时下陷 1–2px；输入类改为内凹槽面。玻璃只保留在导航/工具栏/弹层等功能层。
+- 窗口增加半透明磨砂：CSS 侧为 `rgba(0,0,0,.66)` 半透明底，系统材质由 Tauri 内置的 `Effect::Acrylic`（`DWMWA_SYSTEMBACKDROP_TYPE = 3`）提供，取代原先的 `Effect::Mica`（=2，按壁纸取色、不模糊窗后内容）。**无需新增依赖**。
+- 平面化收敛：删除全部渐变（原 `--glass-sheen` 顶面高光、卡片膜、开关/电平/滑块的渐变填充），改为纯色面 + 顶部高光 + 底部挤出的暗边；滑块轨道改为纯色凹槽并移除已无用的 `--fill` 传参（数值仍由百分比标签给出）。
+- 透明度分层按“背景 < 卡片 < 按钮”排列：窗口 `rgba(0,0,0,.66)`、卡片 `rgba(26,26,26,.82)`、按钮/输入为不透明（`#212121` / `#0d0d0d`）。
+- 次要文字改为中性冷灰、并加入强调色：48 个暗紫灰文字色按等亮度换成 220° 冷灰（对比度不变），亮色标题/卡片名仍为紫；新增 `--accent-cyan`/`--accent-blue`，四路音频按链路分色（真麦青、应用蓝、附加琥珀、监听绿，`RouteCard` 增加 `data-route`），收藏星琥珀、面包屑链接蓝、小标题与波形图标青。
+- “切换透明材质”关闭玻璃时除禁用全部 `backdrop-filter`、将玻璃面改为不透明外，同时清除系统材质（`set_effects(None)`）。
+
+### 验证
+
+- `npm --prefix desktop run build`（`tsc --noEmit` + vite）通过；Rust 13 项、Node 7 项测试通过；交付 CSS 中 `gradient` 出现 0 次。
+- 真实窗口 DWM 属性实测：`DWMWA_SYSTEMBACKDROP_TYPE = 3`（亚克力）、`DWMWA_USE_IMMERSIVE_DARK_MODE = 1`。
+- 真实合成画面（用户桌面 + 125% 缩放）取色：窗口底 `(23,22,20)`、顶栏 `(19,19,17)`、侧栏 `(18,18,17)`、混音栏 `(23,22,21)`；主文字对比度 14.7:1、次级 4.5:1（AA 达标）；各玻璃面高频纹理近 0（背景被材质压平，无清晰桌面细节透过）。
+- Chromium/Edge 156 与真实 Tauri/WebView2（同版本）确认计算样式与折射生效；真实窗口内打开设备对话框与切换透明材质来回均正常。
+- 1320×860 / 1000×760 / 760×640 无横向溢出，“全部静音”可达；纯白桌面（无系统材质时）主文字对比度 ≥11:1。
+- **构建方式更正**：本仓 `desktop/src-tauri/Cargo.toml` 未声明 `custom-protocol` feature，`cargo build --release` 产出的是 **dev 模式**二进制（加载 `devUrl`、不嵌入 `frontendDist`）；生产嵌入需 `cargo build --release --features tauri/custom-protocol`（或项目的 `npm run tauri -- build`）。已实测：前者加载 `http://127.0.0.1:1425/`，后者加载 `http://tauri.localhost/`。细节与限制见 [devlog](devlog/2026-11-03-liquid-glass-frontend.md) 与 [界面方案](docs/09-ui-modernization-plan.md)。
+
 ## [0.3.0] - 2026-11-02
 
 应用内版本管理、更新提醒与 NSIS 安装程序。
