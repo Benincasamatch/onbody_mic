@@ -10,18 +10,20 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{
-      "label": "main",
-      "create": false,
-      "title": "随声麦",
-      "width": 1320,
-      "height": 860,
-      "minWidth": 760,
-      "minHeight": 640,
-      "decorations": false,
-      "transparent": true,
-      "theme": "Dark"
-    }],
+    "windows": [
+      {
+        "label": "main",
+        "create": false,
+        "title": "随声麦",
+        "width": 1320,
+        "height": 860,
+        "minWidth": 760,
+        "minHeight": 640,
+        "decorations": false,
+        "transparent": true,
+        "theme": "Dark"
+      }
+    ],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: blob:; connect-src 'self' ipc: http://ipc.localhost https://api.github.com;",
       "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: blob:; connect-src 'self' ipc: http://ipc.localhost https://api.github.com http://127.0.0.1:1425 ws://127.0.0.1:1425;"
@@ -29,16 +31,40 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "icon": ["icons/icon.ico", "icons/icon.png"],
-    "externalBin": ["binaries/OnbodyMic.EngineHost"],
+    "createUpdaterArtifacts": true,
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "externalBin": [
+      "binaries/OnbodyMic.EngineHost"
+    ],
     "windows": {
-      "webviewInstallMode": { "type": "downloadBootstrapper" },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
       "nsis": {
         "installMode": "currentUser",
-        "languages": ["SimpChinese", "English"],
+        "languages": [
+          "SimpChinese",
+          "English"
+        ],
         "displayLanguageSelector": false,
         "installerIcon": "icons/icon.ico"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgyMDdBQ0VCNkM4QUU5MjEKUldRaDZZcHM2NndIZ29TSzFlc2xNWGdhOXJwR29DUytrRnpURjVkMXZRMi9IYkpHc2p6aFFJOEEK",
+      "endpoints": [
+        "https://github.com/Benincasamatch/onbody_mic/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

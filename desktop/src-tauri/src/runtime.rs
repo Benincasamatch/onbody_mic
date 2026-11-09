@@ -347,12 +347,12 @@ impl DesktopRuntime {
             "restart_engine" => { self.start_engine().await?; Ok(Value::Bool(true)) }
             "exit_app" => {
                 self.exiting.store(true, Ordering::Release);
-                let broker = self.broker.lock().expect("backend handle poisoned").take();
-                if let Some(broker) = broker {
-                    if let Err(error) = tokio::time::timeout(Duration::from_secs(3), broker.request("exit", json!({}))).await { self.notice("Info", format!("后端退出等待结束: {error}")); }
-                    broker.terminate();
-                }
+                self.stop_backend().await;
                 self.app.exit(0); Ok(Value::Bool(true))
+            }
+            "update_prepare" => {
+                self.stop_backend().await;
+                Ok(Value::Bool(true))
             }
             "snapshot" | "devices" | "device_enable" | "apps" | "bind_app" | "route" | "gains" | "play" | "stop" | "mute" | "unlock" | "attach_output" | "prepare_folder_import" | "import_clip" | "inspect_audio" | "preview_audio" | "import_trimmed_audio" | "release_audio_preview" | "clip_rename" | "clip_favorite" | "clip_gain" | "clip_group" | "clip_batch_update" | "group_create" | "group_rename" | "group_delete" | "clip_path" | "hotkeys_suspend" => self.backend()?.request(op, args).await,
             _ => Err(CommandError::new("invalid-argument", format!("不支持的桌面操作: {op}"))),
@@ -364,6 +364,21 @@ impl DesktopRuntime {
             let runtime = self.app.state::<Arc<Self>>().inner().clone();
             tauri::async_runtime::spawn(async move { if let Err(error) = runtime.command("hide_window", json!({})).await { runtime.notice("Info", error.to_string()); } });
         } else if let Err(error) = self.app.emit("confirm_close_to_tray", ()) { self.notice("Info", error.to_string()); }
+    }
+
+    /// Stops the backend and marks the exit as intentional so window/exit hooks
+    /// do not prevent the process from ending for a portable update.
+    pub async fn exit_for_update(&self) {
+        self.exiting.store(true, Ordering::Release);
+        self.stop_backend().await;
+    }
+
+    async fn stop_backend(&self) {
+        let broker = self.broker.lock().expect("backend handle poisoned").take();
+        if let Some(broker) = broker {
+            if let Err(error) = tokio::time::timeout(Duration::from_secs(3), broker.request("exit", json!({}))).await { self.notice("Info", format!("后端退出等待结束: {error}")); }
+            broker.terminate();
+        }
     }
 
     pub fn request_exit(&self) {

@@ -15,7 +15,7 @@
 | 配置与预设 | Rust `models.rs`、`store.rs`、`runtime.rs` | Rust 独占写入 `settings.json` 和 `presets/`，原子保存与备份，保留既有 schema v1 与未知字段；未知版本明确拒绝 |
 | 音频与系统适配 | `src/OnbodyMic.EngineHost/` 及现有 Audio/Application/Media/Platform.Windows | C# 后端拥有设备、素材库、缓存、实时音频、应用捕获与全局热键，不运行旧桌面/CLI 界面 |
 | 进程通信 | Rust `broker.rs`、C# `Protocol.cs`、`Contracts.cs` | 随包后端的标准输入/输出 NDJSON；请求含 `id`、`op`、`args`，响应含成功值或错误；事件独立传递状态、库、热键与通知，不开放网络端口 |
-| 版本与更新检查 | `desktop/src-tauri/build.rs`、`version.rs`、`desktop/src/version.ts`、`update.tsx` | 构建时写入 Git/构建时间戳；`app_info` 返回构建信息、解析后的 CHANGELOG 和更新端点；前端按语义化版本比较 GitHub Releases，发现正式新版本时提醒并打开下载链接，不自动下载或安装 |
+| 版本与更新检查 | `desktop/src-tauri/build.rs`、`version.rs`、`update.rs`、`desktop/src/version.ts`、`update.tsx` | 构建时写入 Git/构建时间戳；`app_info` 返回构建信息、解析后的 CHANGELOG、更新端点和 `installKind`；前端按语义化版本比较 GitHub Releases 并显示更新说明，`tauri-plugin-updater` 从 GitHub Release 的 `latest.json` 读取签名安装包并校验后安装；`update.rs` 为便携版下载 ZIP、校验 SHA-256 并交给退出后替换文件的辅助脚本 |
 
 DTO 的当前字段以 `models.rs` / `Contracts.cs` 为准，不把 §4 中的 JSON 示意当成磁盘格式。音频帧不经 IPC 传入网页；设备句柄和缓冲仍归 C# 音频层。所有按钮与热键通过现有有序会话控制通道，较慢的解码/导入工作不阻塞该通道；迟到结果按播放意图和来源/会话代数拒绝。
 

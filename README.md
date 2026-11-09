@@ -32,6 +32,8 @@ powershell -ExecutionPolicy Bypass -File build/build-desktop.ps1
 
 `-Bundle`（别名 `-Installer`）额外构建 NSIS 安装程序，并复制为 `dist/OnbodyMic-<版本>-desktop-installer-x64.exe`；其 WebView2 引导程序可能需要联网下载。便携包不自动安装 WebView2 或音频驱动。安装程序未签名，Windows 可能提示未知发布者。
 
+安装包构建需要更新签名私钥：首次运行 `powershell -ExecutionPolicy Bypass -File build/update-key.ps1` 生成 `.tools/updater/onbodymic.key`（不纳入版本库）并把公钥写回 `tauri.conf.json`；私钥或密码丢失后无法再为后续版本签名。`-Bundle` 同时在 `dist/` 生成 `latest.json`（版本、安装包 minisign 签名、安装包地址、便携包 SHA-256 与大小）。发布时必须把安装程序、便携 ZIP 与 `latest.json` 上传到同一个 GitHub Release，应用内更新才能发现并校验它。
+
 ```powershell
 npm --prefix desktop test
 npm --prefix desktop run build
@@ -51,7 +53,7 @@ dotnet test OnbodyMic.sln -c Release
 - 电平显示最近采样窗口内的各路峰值；诊断页另保留累计峰值。
 - 其他程序直接写入共享线缆的声音不受本程序开关控制。应用捕获包含目标进程树；同一浏览器中的通话和音乐有回送风险。
 - 设置、素材与日志默认存入 `%LOCALAPPDATA%\OnbodyMic`，可用 `--root` 指定独立目录。程序无音频上传功能。
-- 页脚版本号打开“关于随声麦与更新”：显示版本、Git 提交、提交/构建时间和更新说明；最多每 12 小时请求一次 GitHub Releases 的公开版本信息，发现正式新版本时显示提醒并一键打开下载链接，不自动下载或安装，不发送设备、配置、音频或用户标识。
+- 页脚版本号打开“关于随声麦与更新”：显示版本、Git 提交、提交/构建时间和更新说明；最多每 12 小时请求一次 GitHub Releases 的公开版本信息，发现正式新版本时显示提醒并可**在应用内更新**：安装版下载签名安装程序后静默覆盖并自动重启；便携版下载便携 ZIP、校验 SHA-256 后退出、替换当前文件夹 `win-x64` 下的程序并自动重启；也可手动打开下载链接。更新包只从本项目 GitHub Releases 获取，不发送设备、配置、音频或用户标识。
 - 启动、切换/删除活动预设和明确重启音频后端只恢复配置，不恢复发送、监听、播放或 PID 绑定。
 - 音效库旧 schema 1 可读取，首次成功保存后升级为带裁剪来源和父条目字段的 schema 2；降级到旧程序前需备份素材库。网页/应用录制为素材仍属于 [P5A 计划](docs/03-roadmap-and-acceptance.md)，实时捕获不等于录制。
 

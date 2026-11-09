@@ -13,6 +13,17 @@ if (Test-Path -LiteralPath $localCargo) {
 $env:TEMP = Join-Path $repo '.tools\tmp\native-build'
 $env:TMP = $env:TEMP
 New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+$updaterKey = Join-Path $repo '.tools\updater\onbodymic.key'
+$updaterPassword = Join-Path $repo '.tools\updater\password.txt'
+if ($Bundle) {
+    if (-not (Test-Path -LiteralPath $updaterKey)) {
+        throw "Missing updater signing key: $updaterKey. Run build/update-key.ps1 first."
+    }
+    $env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content -Raw -LiteralPath $updaterKey).Trim()
+    if (Test-Path -LiteralPath $updaterPassword) {
+        $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = (Get-Content -Raw -LiteralPath $updaterPassword).Trim()
+    }
+}
 $frontend = Join-Path $repo 'desktop'
 Push-Location $frontend
 try {
@@ -76,6 +87,40 @@ try {
         $installerTarget = Join-Path $dist $installerName
         Copy-Item -LiteralPath $installer.FullName -Destination $installerTarget
         Write-Host "Native NSIS installer: $installerTarget"
+
+        $signatureFile = "$($installer.FullName).sig"
+        if (-not (Test-Path -LiteralPath $signatureFile)) {
+            throw "Missing updater signature: $signatureFile. Build with TAURI_SIGNING_PRIVATE_KEY set."
+        }
+        $signature = (Get-Content -Raw -LiteralPath $signatureFile).Trim()
+        $portableArchive = Join-Path $dist "$name.zip"
+        $portableHash = (Get-FileHash -LiteralPath $portableArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+        $portableSize = (Get-Item -LiteralPath $portableArchive).Length
+        $downloadBase = "https://github.com/Benincasamatch/onbody_mic/releases/download/v$($config.version)"
+        $changelog = Get-Content -Raw -LiteralPath (Join-Path $repo 'CHANGELOG.md') -Encoding UTF8
+        $notesMatch = [regex]::Match($changelog, "(?ms)^## \[$([regex]::Escape($config.version))[^\r\n]*\r?\n(.*?)(?=^## |\z)")
+        $notes = if ($notesMatch.Success) { $notesMatch.Groups[1].Value.Trim() } else { '' }
+        $manifest = [ordered]@{
+            version = $config.version
+            notes = $notes
+            pub_date = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+            platforms = [ordered]@{
+                'windows-x86_64' = [ordered]@{
+                    signature = $signature
+                    url = "$downloadBase/$installerName"
+                }
+            }
+            portable = [ordered]@{
+                url = "$downloadBase/$($name).zip"
+                sha256 = $portableHash
+                size = $portableSize
+            }
+        }
+        $manifestPath = Join-Path $dist 'latest.json'
+        $utf8 = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($manifestPath, (ConvertTo-Json -InputObject $manifest -Depth 6), $utf8)
+        Write-Host "Updater manifest: $manifestPath"
+        Write-Host "Signed portable archive SHA-256: $portableHash"
     }
 }
 finally {

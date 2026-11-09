@@ -41,6 +41,7 @@ pub struct ReleaseNote {
 pub struct AppInfo {
     pub build: BuildInfo,
     pub releases: Vec<ReleaseNote>,
+    pub install_kind: &'static str,
     pub repository: &'static str,
     pub releases_url: &'static str,
     pub update_api: &'static str,
@@ -61,6 +62,7 @@ pub fn app_info() -> AppInfo {
     AppInfo {
         build: build_info(),
         releases: parse_changelog(CHANGELOG).into_iter().take(12).collect(),
+        install_kind: crate::update::install_kind(),
         repository: REPOSITORY,
         releases_url: RELEASES_URL,
         update_api: UPDATE_API,

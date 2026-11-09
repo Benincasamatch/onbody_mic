@@ -241,3 +241,22 @@ Follow-up: 对应问题、修复、复测记录
 
 包内保留使用说明、契约、验证记录与开发日志，未覆盖旧便携包/安装程序，未写默认用户根。包启动证据保存在 `.tools/fix-smoke/package-evidence.json`。
 
+
+## 12. 应用内更新（2026-11-09）
+
+### 12.1 已执行结果
+
+| 项 | 结果 |
+| --- | --- |
+| 单元测试 | `cargo test --lib` 17 项通过：SHA-256 格式与大小写、更新包 URL 白名单（含 lookalike 与 `http://127.0.0.1` 默认拒绝）、Windows 重启参数转义、更新包哈希校验、CHANGELOG 解析 |
+| 签名与清单 | `build/build-desktop.ps1 -Bundle` 用 `.tools/updater/onbodymic.key` 签名 NSIS 安装包（36.17 MiB）并产出 `.sig`；脚本写出 `dist/latest.json`（版本、notes、平台签名/地址、便携包 SHA-256 与大小） |
+| 辅助替换脚本 | 模拟旧进程退出后：两个可执行文件替换并逐字节数确认；以原参数重启，`--root "C:\a b"` 到达子进程时未拆分；zip、参数文件与解压目录清理；`%TEMP%\onbodymic-update.log` 记录 `updated` |
+| 便携版端到端 | 隔离数据根 + 本地 `127.0.0.1:8123` 清单/包（`ONBODYMIC_UPDATE_ALLOW_LOCAL=1`）：横幅显示 v0.7.1 与“立即更新”；点击后显示下载百分比；下载 49.5 MB 后程序退出；辅助脚本替换 `win-x64/onbodymic-desktop.exe` 为新负载（SHA-256 前 16 位 `27d45bda45048e6f`，16 869 888 字节）并重启，新进程保留 `--root` 参数并重新拉起后端 |
+| 安装版端到端 | 经用户同意，用本地端点配置的 0.7.0 安装包覆盖 `E:\tools\OnbodyMic`，再由本地 `127.0.0.1:8124` 清单提供经 minisign 签名的 0.7.1 安装包：点击“立即更新”后插件下载并校验签名、应用退出，NSIS 静默覆盖并在约 30 秒内重启；注册表 `DisplayVersion` 变为 0.7.1，新进程保留 `--root` 参数、`installKind=installed`，插件 `check` 对同一清单返回“无更新”（说明运行的是 0.7.1）。验证后已用正式 0.7.0 安装包恢复该目录（`DisplayVersion` 回到 0.7.0） |
+
+### 12.2 未验证与边界
+
+- 安装版更新会替换现有安装（本轮在用户同意下执行，之后已恢复正式 0.7.0）。NSIS 打包会对可执行文件写入 bundle 信息，安装后的文件哈希与构建目录中的 `onbodymic-desktop.exe` 不同，不能用文件哈希判断版本；以注册表 `DisplayVersion` 与插件 `current_version` 为准。
+- 便携版信任链为 HTTPS + GitHub 账号（清单中的 SHA-256 未被 minisign 覆盖）；安装包由 minisign 公钥校验。
+- 更新时未保存的预设修改不落盘（与“退出程序”一致）。
+- 本地 loopback 更新地址仅由 `ONBODYMIC_UPDATE_ALLOW_LOCAL=1` 打开，默认拒绝。

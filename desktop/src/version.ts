@@ -21,6 +21,7 @@ export interface ReleaseNote {
 export interface AppInfo {
   build: BuildInfo;
   releases: ReleaseNote[];
+  installKind: 'installed' | 'portable' | 'development' | 'unknown' | string;
   repository: string;
   releasesUrl: string;
   updateApi: string;

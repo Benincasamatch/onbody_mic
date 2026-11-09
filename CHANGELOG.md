@@ -2,6 +2,30 @@
 
 所有显著变更按版本记录。格式参考 Keep a Changelog；本项目版本号独立于文档基线版本（文档 v1.x 见 docs/04）。
 
+## [Unreleased]
+
+应用内检查并更新（安装版与便携版）；同时把侧栏设置入口固定在底部。
+
+### 新增
+
+- **应用内检查并更新**：横幅与“关于随声麦与更新”新增“立即更新”，带下载进度、失败原因与重试；成功后自动重启。安装版通过 `tauri-plugin-updater` 从 GitHub Release 的 `latest.json` 读取更新，校验 minisign 签名后以 NSIS 静默更新（`/P /UPDATE /R`）；便携版下载便携 ZIP、校验清单 SHA-256，退出后由辅助脚本替换 `win-x64` 下两个可执行文件并重启。开发构建与未知分发方式只保留手动下载入口。
+- **更新签名与清单**：`build/update-key.ps1` 生成 `.tools/updater/` 下的私钥与密码并回写公钥到 `tauri.conf.json`；`build/build-desktop.ps1 -Bundle` 注入签名环境，产出 `*.exe.sig` 与 `dist/latest.json`（安装包签名/地址、便携包 SHA-256 与大小），发布时三个资产同传。
+- `app_info` 增加 `installKind`（`installed` / `portable` / `development` / `unknown`），前端据此选择更新方式。
+
+### 修复
+
+- **“打开设置”会滚出侧栏**：侧栏自身是滚动容器，分组与音效树超过一屏时按钮被推到内容末尾、滚出可视区。现在侧栏拆为可滚动导航区（`.sidebar-scroll`）与固定底部入口，按钮位置恒定。
+- **收起/窄宽度下设置入口消失**：`.sidebar-collapsed` 与 ≤700px 断点原先把 `.sidebar-note` 整条 `display:none`；现在收起态保留图标按钮（58px 栏内居中，`aria-label="打开设置"`），窄断点改为导航右侧的仅图标按钮。
+
+### 验证
+
+- `npm --prefix desktop run build`（`tsc --noEmit` + vite）通过；`cargo test --lib` 17 项通过（哈希/URL/重启参数/清单解析相关）。
+- `build/build-desktop.ps1 -Bundle` 用生成的密钥签名 NSIS 安装包（36.17 MiB，产出 `.sig`）并写出 `dist/latest.json`。
+- 辅助替换脚本单独实测：旧程序等待退出后替换两个文件、按字节数确认、以原启动参数（含空格路径 `C:\a b` 作为单个参数）重启、清理压缩包与参数文件。
+- 便携版端到端实测：隔离数据根 + 本地清单点击“立即更新”，横幅显示下载百分比，程序退出后被替换为 0.7.1 负载（SHA-256 前 16 位 `27d45bda45048e6f`）并以原 `--root` 参数重启。
+- 安装版端到端实测（经同意）：本地端点构建的 0.7.0 安装包覆盖 `E:\tools\OnbodyMic`，签名的 0.7.1 安装包经插件校验、静默安装并自动重启；`DisplayVersion` 0.7.0→0.7.1，运行参数与 `installKind=installed` 保持，随后恢复为正式 0.7.0。详见 [docs/07 §12](docs/07-validation-and-handoff.md#12-应用内更新2026-11-09)。
+- Edge 1280×760 实测：按钮 y 668–705、侧栏底 722；注入 40 行导航后 `.sidebar-scroll` `scrollHeight 1875 / clientHeight 587`，滚到底按钮仍为 668–705；收起后 42×37 贴底、点击打开“设置”对话框。详见 devlog。
+
 ## [0.7.0] - 2026-11-09
 
 批量导入、多选批量编辑与树形导航。核心是把“导入后逐条打开卡片改分组/增益/收藏/名称”的重复操作合并为一次设置，让后端以单次索引写入保证整批生效或整批不变；侧栏同时改为分组与音效的树形目录。

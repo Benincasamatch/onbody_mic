@@ -2,6 +2,7 @@ mod broker;
 mod models;
 mod runtime;
 mod store;
+mod update;
 mod version;
 
 use std::sync::Arc;
@@ -36,7 +37,8 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![desktop_state, desktop_command, app_info])
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![desktop_state, desktop_command, app_info, update::install_portable_update])
         .setup(|app| {
             let runtime = Arc::new(DesktopRuntime::new(app.handle().clone())?);
             app.manage(runtime.clone());

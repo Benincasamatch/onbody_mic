@@ -281,3 +281,4 @@ maySend(clip) = baseValid(clip) AND extrasSendEnabled AND explicitPlaybackActive
 - 若将来引入 FFmpeg，需针对选定构建和分发方式单独核查，不在首版默默增加下载或许可范围。
 - 普通运行不主动要求管理员；权限不足时解释并限定功能，不建议通过关闭系统安全功能或设置 `--no-sandbox` 解决本项目兼容性。
 - 不自动升级用户机器上的全局 .NET、驱动或其他依赖。
+- 应用内更新只替换本程序（安装版覆盖自身安装目录，便携版只替换 `win-x64` 下两个可执行文件），不静默安装驱动、WebView2 或其他系统依赖。安装包必须通过内置 minisign 公钥校验，便携包按更新清单校验 SHA-256；校验失败不执行任何替换。
