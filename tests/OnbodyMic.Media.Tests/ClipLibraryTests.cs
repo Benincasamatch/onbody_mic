@@ -282,6 +282,66 @@ public sealed class ClipLibraryTests : IDisposable
     }
 
     [Fact]
+    public void Import_applies_initial_gain_and_favorite_and_rejects_invalid_gain()
+    {
+        using var library = OpenLib();
+        var item = library.Import(SourceFile("boost.wav"), gain: 0.5f, favorite: true).Item;
+
+        Assert.Equal(0.5f, item.Gain);
+        Assert.True(item.Favorite);
+        Assert.Throws<ClipImportException>(() => library.Import(SourceFile("bad-gain.wav"), gain: float.NaN));
+        Assert.Throws<ClipImportException>(() => library.Import(SourceFile("wide-gain.wav"), gain: 4.01f));
+        Assert.Single(library.ItemsSnapshot());
+
+        using var reopened = OpenLib();
+        var saved = reopened.Find(item.ClipId)!;
+        Assert.Equal(0.5f, saved.Gain);
+        Assert.True(saved.Favorite);
+    }
+
+    [Fact]
+    public void Update_many_applies_group_gain_favorite_and_rename_with_one_persisted_change()
+    {
+        using var library = OpenLib();
+        var alpha = library.Import(SourceFile("alpha.wav"), displayName: "Alpha").Item;
+        var beta = library.Import(SourceFile("beta.wav"), displayName: "Beta").Item;
+        var group = library.CreateGroup("批量")!;
+        var changes = 0;
+        library.Changed += () => changes++;
+
+        var updated = library.UpdateMany([alpha.ClipId, beta.ClipId], applyGroup: true, group.GroupId, gain: 0.25f, favorite: true, rename: item => item.DisplayName + " (批量)");
+
+        Assert.Equal(2, updated);
+        Assert.Equal(1, changes);
+
+        using var reopened = OpenLib();
+        foreach (var expected in new[] { ("Alpha (批量)", alpha.ClipId), ("Beta (批量)", beta.ClipId) })
+        {
+            var saved = reopened.Find(expected.Item2)!;
+            Assert.Equal(expected.Item1, saved.DisplayName);
+            Assert.Equal(group.GroupId, saved.GroupId);
+            Assert.Equal(0.25f, saved.Gain);
+            Assert.True(saved.Favorite);
+        }
+    }
+
+    [Fact]
+    public void Update_many_rejects_invalid_batch_without_partial_changes()
+    {
+        using var library = OpenLib();
+        var item = library.Import(SourceFile("intact.wav"), displayName: "Intact").Item;
+
+        Assert.Throws<ClipImportException>(() => library.UpdateMany([item.ClipId, "clip-missing"], false, null, 0.5f, true, null));
+        Assert.Throws<ClipImportException>(() => library.UpdateMany([item.ClipId], true, "group-missing", null, null, null));
+        Assert.Throws<ClipImportException>(() => library.UpdateMany([item.ClipId], false, null, 5f, null, null));
+        Assert.Throws<ClipImportException>(() => library.UpdateMany([item.ClipId], false, null, null, null, _ => "   "));
+        Assert.Equal(item, library.Find(item.ClipId));
+
+        using var reopened = OpenLib();
+        Assert.Equal(item, reopened.Find(item.ClipId));
+    }
+
+    [Fact]
     public void Direct_file_plans_keep_selection_order_without_creating_groups_or_decoding()
     {
         using var library = OpenLib();

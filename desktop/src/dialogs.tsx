@@ -4,8 +4,9 @@ import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { Button, ConfirmationDialog, Dialog, Icon, IconButton, Select } from './components';
 import type { IconName } from './icons';
 import { useDesktop } from './context';
+import { applyRenameRule, fileBaseName } from './context';
 import { desktopCommand, errorMessage } from './bridge';
-import type { AppInstance, AudioDevice, ClipItem, HotkeySection, PanelKind, PresetApplyResult, PresetConfig, SettingsData } from './types';
+import type { AppInstance, AudioDevice, BatchImportOptions, ClipItem, HotkeySection, PanelKind, PresetApplyResult, PresetConfig, RenameRule, SettingsData } from './types';
 import { descendantGroupIds, groupOptions, groupPath } from './library';
 import { AudioEditorDialog } from './AudioEditor';
 import type { ImportResult } from './types';
@@ -243,7 +244,122 @@ function DuplicateImportDialog() {
     catch (failure) { setError(errorMessage(failure)); }
     finally { guard.current = false; setPending(false); }
   }
-  return <Dialog title="发现重复音效" close={() => { void resolve(false); }} pending={pending}><p>音效库已有相同内容。跳过不会修改现有条目；继续将创建独立副本，并保留目标分组。处理后继续下一项。</p><code className="path-text">{desktop.duplicatePath}</code>{error && <p className="inline-error" role="alert">{error}</p>}<div className="dialog-actions"><Button disabled={pending} onClick={desktop.cancelImports}>取消剩余导入</Button><Button disabled={pending} onClick={() => { void resolve(false); }}>跳过此文件</Button><Button variant="primary" disabled={pending} onClick={() => { void resolve(true); }}>{pending ? '正在处理…' : '仍创建新副本'}</Button></div></Dialog>;
+  return <Dialog title="发现重复音效" close={() => { void resolve(false); }} pending={pending}><p>音效库已有相同内容。跳过不会修改现有条目；继续将创建独立副本，并保留目标分组、增益与收藏设置。处理后继续下一项。</p><code className="path-text">{desktop.duplicatePath}</code>{error && <p className="inline-error" role="alert">{error}</p>}<div className="dialog-actions"><Button disabled={pending} onClick={desktop.cancelImports}>取消剩余导入</Button><Button disabled={pending} onClick={() => { void resolve(false); }}>跳过此文件</Button><Button variant="primary" disabled={pending} onClick={() => { void resolve(true); }}>{pending ? '正在处理…' : '仍创建新副本'}</Button></div></Dialog>;
+}
+
+type RenameMode = RenameRule['mode'] | 'keep';
+
+function RenameFields({ mode, setMode, value, setValue, replacement, setReplacement, preview }: {
+  mode: RenameMode; setMode(value: RenameMode): void;
+  value: string; setValue(value: string): void;
+  replacement: string; setReplacement(value: string): void;
+  preview: string;
+}) {
+  return <>
+    <label className="form-field">名称规则<Select aria-label="批量名称规则" value={mode} onChange={next => setMode(next as RenameMode)} options={[{ value: 'keep', label: '保留原名' }, { value: 'prefix', label: '添加前缀' }, { value: 'suffix', label: '添加后缀' }, { value: 'replace', label: '查找并替换' }]} /></label>
+    {mode !== 'keep' && <label className="form-field">{mode === 'replace' ? '查找文本' : mode === 'prefix' ? '前缀' : '后缀'}<input aria-label={mode === 'replace' ? '查找文本' : '前缀或后缀文本'} value={value} onChange={event => setValue(event.target.value)} /></label>}
+    {mode === 'replace' && <label className="form-field">替换为<input aria-label="替换文本" value={replacement} onChange={event => setReplacement(event.target.value)} /></label>}
+    <p className="form-notice">名称预览：{preview}</p>
+  </>;
+}
+
+export function ImportBatchDialog() {
+  const desktop = useDesktop();
+  const files = desktop.pendingImportBatch ?? [];
+  const groups = desktop.state?.engine?.groups ?? [];
+  const folderGrouped = files.some(file => Boolean(file.groupId));
+  const [groupMode, setGroupMode] = useState<'keep' | 'none' | 'group'>(folderGrouped ? 'keep' : 'none');
+  const [groupId, setGroupId] = useState('');
+  const [gain, setGain] = useState('100');
+  const [favorite, setFavorite] = useState(false);
+  const [renameMode, setRenameMode] = useState<RenameMode>('keep');
+  const [renameValue, setRenameValue] = useState('');
+  const [replacement, setReplacement] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const sample = fileBaseName(files[0]?.path ?? '');
+  const rule: RenameRule | null = renameMode === 'keep' ? null : { mode: renameMode, value: renameValue, replacement };
+  const preview = applyRenameRule(sample, rule) ?? sample;
+  const gainValue = Number(gain);
+  const invalid = !files.length || (groupMode === 'group' && !groupId) || !gain.trim() || !Number.isFinite(gainValue) || gainValue < 0 || gainValue > 400 || (rule !== null && !rule.value.trim());
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (invalid || busy) return;
+    setBusy(true);
+    setError('');
+    try { await desktop.confirmImportBatch({ groupMode, groupId: groupId || null, gain: gainValue / 100, favorite, rename: rule }); }
+    catch (failure) { setError(errorMessage(failure)); setBusy(false); }
+  }
+  const groupValue = groupMode === 'group' ? groupId : groupMode;
+  return <Dialog title={`批量导入 ${files.length} 个文件`} close={desktop.cancelImportBatch} pending={busy}>
+    <p className="dialog-description">以下设置一次应用到本批全部文件。重复内容与超过 60 秒的文件仍会逐项确认或裁剪。</p>
+    <form onSubmit={event => { void submit(event); }}>
+      <div className="form-two-columns">
+        <label className="form-field">分组<Select aria-label="导入分组" value={groupValue} onChange={value => { if (value === 'keep' || value === 'none') { setGroupMode(value); setGroupId(''); } else { setGroupMode('group'); setGroupId(value); } }} options={[...(folderGrouped ? [{ value: 'keep', label: '保持源文件夹分组' }] : []), { value: 'none', label: '未分组' }, ...groupOptions(groups)]} /></label>
+        <label className="form-field">统一单条增益 (%)<input aria-label="批量导入增益" type="number" min="0" max="400" step="1" value={gain} onChange={event => setGain(event.target.value)} disabled={busy} /></label>
+      </div>
+      <label className="form-check"><input type="checkbox" checked={favorite} disabled={busy} onChange={event => setFavorite(event.target.checked)} /><span>导入后全部加入收藏</span></label>
+      <RenameFields mode={renameMode} setMode={setRenameMode} value={renameValue} setValue={setRenameValue} replacement={replacement} setReplacement={setReplacement} preview={preview} />
+      {error && <p className="inline-error" role="alert">{error}</p>}
+      <div className="dialog-actions"><Button disabled={busy} onClick={desktop.cancelImportBatch}>取消导入</Button><Button type="submit" variant="primary" disabled={busy || invalid}>{busy ? '正在应用…' : `开始导入 ${files.length} 个文件`}</Button></div>
+    </form>
+  </Dialog>;
+}
+
+export function ClipBatchDialog({ close }: { close(): void }) {
+  const desktop = useDesktop();
+  const ids = desktop.selectedClipIds;
+  const clips = desktop.state?.engine?.clips ?? [];
+  const groups = desktop.state?.engine?.groups ?? [];
+  const [groupMode, setGroupMode] = useState<'keep' | 'none' | 'group'>('keep');
+  const [groupId, setGroupId] = useState('');
+  const [gainMode, setGainMode] = useState<'keep' | 'set'>('keep');
+  const [gain, setGain] = useState('100');
+  const [favoriteMode, setFavoriteMode] = useState<'keep' | 'true' | 'false'>('keep');
+  const [renameMode, setRenameMode] = useState<RenameMode>('keep');
+  const [renameValue, setRenameValue] = useState('');
+  const [replacement, setReplacement] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const sample = clips.find(clip => clip.clipId === ids[0])?.displayName ?? '';
+  const rule: RenameRule | null = renameMode === 'keep' ? null : { mode: renameMode, value: renameValue, replacement };
+  const preview = applyRenameRule(sample, rule) ?? sample;
+  const gainValue = Number(gain);
+  const changed = groupMode !== 'keep' || gainMode === 'set' || favoriteMode !== 'keep' || renameMode !== 'keep';
+  const invalid = !ids.length || !changed || (groupMode === 'group' && !groupId) || (gainMode === 'set' && (!gain.trim() || !Number.isFinite(gainValue) || gainValue < 0 || gainValue > 400)) || (rule !== null && !rule.value.trim());
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (invalid || busy) return;
+    setBusy(true);
+    setError('');
+    const args: Record<string, unknown> = { clipIds: ids };
+    if (groupMode !== 'keep') args.groupId = groupMode === 'none' ? null : groupId;
+    if (gainMode === 'set') args.gain = gainValue / 100;
+    if (favoriteMode !== 'keep') args.favorite = favoriteMode === 'true';
+    if (rule !== null) args.rename = rule;
+    try {
+      await desktop.perform('clip_batch_update', args);
+      desktop.notify(`已修改 ${ids.length} 条音效`);
+      desktop.clearClipSelection();
+      desktop.setSelectionMode(false);
+      close();
+    } catch (failure) { setError(errorMessage(failure)); }
+    finally { setBusy(false); }
+  }
+  return <Dialog title={`批量修改 ${ids.length} 条音效`} close={close} pending={busy}>
+    <p className="dialog-description">只修改选择了规则的项目；一次保存为一条素材索引，失败时整批不生效。</p>
+    <form onSubmit={event => { void submit(event); }}>
+      <label className="form-field">分组<Select aria-label="批量分组" value={groupMode === 'group' ? groupId : groupMode} onChange={value => { if (value === 'keep' || value === 'none') { setGroupMode(value); setGroupId(''); } else { setGroupMode('group'); setGroupId(value); } }} options={[{ value: 'keep', label: '不修改分组' }, { value: 'none', label: '移到未分组' }, ...groupOptions(groups)]} /></label>
+      <div className="form-two-columns">
+        <label className="form-field">单条增益<Select aria-label="批量增益规则" value={gainMode} onChange={value => setGainMode(value as 'keep' | 'set')} options={[{ value: 'keep', label: '不修改增益' }, { value: 'set', label: '统一设置增益' }]} /></label>
+        {gainMode === 'set' && <label className="form-field">增益 (%)<input aria-label="批量增益百分比" type="number" min="0" max="400" step="1" value={gain} onChange={event => setGain(event.target.value)} disabled={busy} /></label>}
+      </div>
+      <label className="form-field">收藏<Select aria-label="批量收藏规则" value={favoriteMode} onChange={value => setFavoriteMode(value as 'keep' | 'true' | 'false')} options={[{ value: 'keep', label: '不修改收藏' }, { value: 'true', label: '设为收藏' }, { value: 'false', label: '取消收藏' }]} /></label>
+      <RenameFields mode={renameMode} setMode={setRenameMode} value={renameValue} setValue={setRenameValue} replacement={replacement} setReplacement={setReplacement} preview={preview} />
+      {error && <p className="inline-error" role="alert">{error}</p>}
+      <div className="dialog-actions"><Button disabled={busy} onClick={close}>取消</Button><Button type="submit" variant="primary" disabled={busy || invalid}>{busy ? '正在保存…' : `应用到 ${ids.length} 条音效`}</Button></div>
+    </form>
+  </Dialog>;
 }
 
 export function SettingsDialog({ close, open }: { close(): void; open(kind: PanelKind): void }) {
@@ -260,7 +376,8 @@ export function PendingDialogs() {
   const desktop = useDesktop();
   const crop = desktop.pendingAudioImport;
   return <>
-    {crop && <AudioEditorDialog key={`${crop.file.path}:${crop.remaining}`} source={{ path: crop.file.path }} initialInspection={crop.inspection} displayName={crop.file.path.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || '新音效'} groupId={crop.file.groupId} reason={crop.reason} remaining={crop.remaining} close={desktop.skipAudioImport} cancelQueue={desktop.cancelImports} save={desktop.saveAudioImport} />}
+    {crop && <AudioEditorDialog key={`${crop.file.path}:${crop.remaining}`} source={{ path: crop.file.path }} initialInspection={crop.inspection} displayName={(crop.file.displayName ?? fileBaseName(crop.file.path)) || '新音效'} groupId={crop.file.groupId} reason={crop.reason} remaining={crop.remaining} close={desktop.skipAudioImport} cancelQueue={desktop.cancelImports} save={desktop.saveAudioImport} />}
+    {desktop.pendingImportBatch && <ImportBatchDialog />}
     {desktop.duplicatePath && <DuplicateImportDialog />}
     {desktop.leaveRequest && <Dialog title="预设有未保存修改" close={() => { void desktop.resolveLeave('cancel'); }}><p>增益、设备或音效库视图尚未保存。继续会丢弃当前预设的未保存修改。</p><div className="dialog-actions"><Button onClick={() => { void desktop.resolveLeave('cancel'); }}>取消</Button><Button onClick={() => { void desktop.resolveLeave('discard').catch(failure => desktop.notify(errorMessage(failure))); }}>不保存并继续</Button><Button variant="primary" onClick={() => { void desktop.resolveLeave('save').catch(failure => desktop.notify(errorMessage(failure))); }}>保存并继续</Button></div></Dialog>}
     {desktop.closeConfirmation && <Dialog title="关闭窗口后继续在托盘运行" close={() => { void desktop.closeToTray(false); }}><p>关闭窗口不会停止正在发送的音频。要彻底停止，请使用托盘退出；全部静音仍可通过热键操作。</p><div className="dialog-actions"><Button onClick={() => { void desktop.closeToTray(false); }}>取消关闭</Button><Button variant="primary" onClick={() => { void desktop.closeToTray(true).catch(failure => desktop.notify(errorMessage(failure))); }}>继续在托盘运行</Button></div></Dialog>}

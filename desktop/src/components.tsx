@@ -87,15 +87,20 @@ export function RouteCard({ route, pickApp }: { route: RouteId; pickApp(): void 
   const status = engine?.status;
   const info = routeInfo[route];
   const enabled = Boolean(status && (route === 'mic' ? status.switches.micSendEnabled : route === 'app' ? status.switches.appSendEnabled : route === 'extras' ? status.switches.extrasSendEnabled : status.switches.monitorEnabled));
+  const suspended = Boolean(status && route === 'monitor' && status.monitorSuspendedForPreview);
+  const active = enabled || suspended;
   const gain = status ? (route === 'extras' ? status.gains.clip : status.gains[route]) : 0;
   const level = engine ? (route === 'mic' ? engine.levels.mic : route === 'app' ? engine.levels.app : route === 'extras' ? engine.levels.clip : null) : null;
-  const source = !status ? '音频后端未就绪' : route === 'mic' ? (status.devices?.micDeviceId ? '已配置麦克风' : '未配置麦克风') : route === 'app' ? status.appBinding?.description ?? '尚未确认运行中的应用' : route === 'extras' ? '应用与音效的发送总开关' : status.devices?.monitorDeviceId ? '已配置监听耳机' : '未配置监听耳机';
+  const monitorDevice = route === 'monitor' ? desktop.devices.find(device => device.id === status?.devices?.monitorDeviceId) : undefined;
+  const source = !status ? '音频后端未就绪' : route === 'mic' ? (status.devices?.micDeviceId ? '已配置麦克风' : '未配置麦克风') : route === 'app' ? status.appBinding?.description ?? '尚未确认运行中的应用' : route === 'extras' ? '应用与音效的发送总开关' : status.devices?.monitorDeviceId ? (monitorDevice ? `${monitorDevice.friendlyName}${monitorDevice.state === 'Active' ? '' : ` · ${monitorDevice.state}`}` : '已配置监听耳机') : '未配置监听耳机';
+  const stateLabel = suspended ? '试听中暂停' : enabled ? '已开启' : '关闭';
+  const sourceLabel = suspended ? `${source}；试听结束后自动恢复` : source;
   async function toggle() {
     setChanging(true);
     try { await desktop.perform('route', { kind: route, enabled: !enabled, monitorMode: status?.monitorMode }); }
     finally { setChanging(false); }
   }
-  return <article className={`route-card compact ${enabled ? 'is-on' : ''}`} data-route={route}><div className="route-heading"><span className="route-icon"><Icon name={info.icon} size={18} /></span><h3>{info.name}</h3><span className={`route-state ${enabled ? 'on' : ''}`}>{enabled ? '已开启' : '关闭'}</span></div><p className="route-source" title={source}>{source}</p>{route === 'app' && <button type="button" className="app-bind-link" disabled={!status || status.switches.appSendEnabled} onClick={pickApp}><Icon name="link" size={12} />{status?.appBinding ? '重新绑定应用' : '绑定应用…'}</button>}<div className="route-switch-line"><span>{info.action}</span><button type="button" role="switch" aria-label={info.action} aria-checked={enabled} disabled={!status || changing || status.emergencyLatched || (route === 'app' && !status.switches.extrasSendEnabled)} className={`toggle ${enabled ? 'checked' : ''}`} onClick={() => { void toggle().catch(() => undefined); }}><span /></button></div>
+  return <article className={`route-card compact ${active ? 'is-on' : ''}`} data-route={route}><div className="route-heading"><span className="route-icon"><Icon name={info.icon} size={18} /></span><h3>{info.name}</h3><span className={`route-state ${active ? 'on' : ''}`}>{stateLabel}</span></div><p className="route-source" title={sourceLabel}>{sourceLabel}</p>{route === 'app' && <button type="button" className="app-bind-link" disabled={!status || status.switches.appSendEnabled} onClick={pickApp}><Icon name="link" size={12} />{status?.appBinding ? '重新绑定应用' : '绑定应用…'}</button>}<div className="route-switch-line"><span>{info.action}</span><button type="button" role="switch" aria-label={info.action} aria-checked={enabled} disabled={!status || changing || status.emergencyLatched || (route === 'app' && !status.switches.extrasSendEnabled)} className={`toggle ${enabled ? 'checked' : ''}`} onClick={() => { void toggle().catch(() => undefined); }}><span /></button></div>
     {route === 'monitor' && <Select className="monitor-select" aria-label="监听模式" disabled={!status} value={status?.monitorMode ?? 'ClipOnly'} onChange={value => { void desktop.perform('route', { kind: 'monitor', enabled, monitorMode: value }).catch(() => undefined); }} options={[{ value: 'ClipOnly', label: '仅音效' }, { value: 'FullEndpoint', label: '实际虚拟麦' }]} />}
     <div className="gain-label"><span>{route === 'monitor' ? '监听音量' : '增益'}</span><span>{status ? Math.round(gain * 100) + '%' : '—'}</span></div><input type="range" className="gain-slider" aria-label={`${info.name}增益`} min="0" max="400" step="1" disabled={!status} value={Math.round(gain * 100)} onChange={event => { if (status) void desktop.perform('gains', { ...status.gains, [route === 'extras' ? 'clip' : route]: Number(event.target.value) / 100 }).catch(() => undefined); }} />
     {route !== 'monitor' && <div className="meter-line"><div className={`meter ${enabled ? 'active' : ''}`} aria-label={`${info.name}当前峰值`}><span style={{ width: level === null ? '0%' : `${Math.min(100, Math.max(0, level * 100))}%` }} /></div><span>{level === null ? '—' : level > 0 ? `${(20 * Math.log10(level)).toFixed(0)} dB` : '−∞'}</span></div>}
@@ -121,32 +126,73 @@ export function ClipGrid({ edit, hotkeys }: { edit(clip: ClipItem): void; hotkey
   const engine = desktop.state?.engine;
   const playingId = engine?.status.clip?.mode === 'Preview' && engine.status.clip.clipId.startsWith('editor-preview:') ? null : engine?.status.clip?.clipId ?? null;
   const playingEpoch = engine?.status.clip?.playbackEpoch ?? 0;
-  return <div className="clip-grid">{desktop.filteredClips.map(clip => { const playing = clip.clipId === playingId; return <article key={clip.clipId} className={`sound-tile ${desktop.selectedClip?.clipId === clip.clipId ? 'selected' : ''} ${!clip.available ? 'missing' : ''} ${playing ? 'playing' : ''}`}><div className="tile-top"><span className="tile-category" title={groupPath(engine?.groups ?? [], clip.groupId).map(group => group.name).join(' / ') || '未分组'}>{groupPath(engine?.groups ?? [], clip.groupId).map(group => group.name).join(' / ') || '未分组'}</span><button type="button" className={`favorite-button ${clip.favorite ? 'favorited' : ''}`} aria-label={`${clip.favorite ? '取消收藏' : '收藏'}${clip.displayName}`} aria-pressed={clip.favorite} onClick={() => { void desktop.perform('clip_favorite', { clipId: clip.clipId, value: !clip.favorite }).catch(() => undefined); }}><Icon name="star" size={15} /></button></div><button type="button" className="tile-main" onClick={() => { desktop.selectClip(clip.clipId); edit(clip); }} onDoubleClick={() => { if (clip.available) void desktop.perform('play', { clipId: clip.clipId, mode: 'send' }).catch(() => undefined); }}><ClipWaveform clip={clip} playing={playing} key={playing ? `playing-${playingEpoch}` : clip.clipId} /><strong title={clip.displayName}>{clip.displayName}</strong><span>{clip.available ? Math.round(clip.gain * 100) === 100 ? clip.format.toUpperCase() : `${clip.format.toUpperCase()} · ${Math.round(clip.gain * 100)}% 增益` : '素材文件缺失'}</span></button><div className="tile-meta"><span>{(clip.durationMs / 1000).toFixed(1)}s</span><button type="button" className="shortcut-chip" aria-label={`设置${clip.displayName}播放热键`} title="快速添加快捷键" onClick={() => { desktop.selectClip(clip.clipId); hotkeys(clip); }}>{desktop.state?.settings.clipHotkeys[clip.clipId] ? <kbd>{desktop.state.settings.clipHotkeys[clip.clipId]}</kbd> : <><Icon name="keyboard" size={12} /><span>快捷</span></>}</button></div><div className="tile-actions"><button type="button" disabled={!clip.available || engine?.status.emergencyLatched} onClick={() => { void desktop.perform('play', { clipId: clip.clipId, mode: 'preview' }).catch(() => undefined); }}><Icon name="play" size={13} />试听</button><button type="button" disabled={!clip.available || !engine?.status.switches.extrasSendEnabled || engine?.status.emergencyLatched} onClick={() => { void desktop.perform('play', { clipId: clip.clipId, mode: 'send' }).catch(() => undefined); }}><Icon name="send" size={13} />发送</button></div></article>; })}
+  return <div className="clip-grid">{desktop.filteredClips.map(clip => {
+    const playing = clip.clipId === playingId;
+    const picked = desktop.selectionMode && desktop.selectedClipIds.includes(clip.clipId);
+    return <article key={clip.clipId} className={`sound-tile ${desktop.selectedClip?.clipId === clip.clipId ? 'selected' : ''} ${!clip.available ? 'missing' : ''} ${playing ? 'playing' : ''} ${picked ? 'picked' : ''}`}><div className="tile-top">{desktop.selectionMode && <span className={`tile-check ${picked ? 'picked' : ''}`} aria-hidden="true"><Icon name="check" size={11} /></span>}<span className="tile-category" title={groupPath(engine?.groups ?? [], clip.groupId).map(group => group.name).join(' / ') || '未分组'}>{groupPath(engine?.groups ?? [], clip.groupId).map(group => group.name).join(' / ') || '未分组'}</span><button type="button" className={`favorite-button ${clip.favorite ? 'favorited' : ''}`} aria-label={`${clip.favorite ? '取消收藏' : '收藏'}${clip.displayName}`} aria-pressed={clip.favorite} onClick={() => { void desktop.perform('clip_favorite', { clipId: clip.clipId, value: !clip.favorite }).catch(() => undefined); }}><Icon name="star" size={15} /></button></div><button type="button" className="tile-main" onClick={event => { if (desktop.selectionMode) { desktop.toggleClipSelection(clip.clipId, event.shiftKey); return; } desktop.selectClip(clip.clipId); edit(clip); }} onDoubleClick={() => { if (!desktop.selectionMode && clip.available) void desktop.perform('play', { clipId: clip.clipId, mode: 'send' }).catch(() => undefined); }}><ClipWaveform clip={clip} playing={playing} key={playing ? `playing-${playingEpoch}` : clip.clipId} /><strong title={clip.displayName}>{clip.displayName}</strong><span>{clip.available ? Math.round(clip.gain * 100) === 100 ? clip.format.toUpperCase() : `${clip.format.toUpperCase()} · ${Math.round(clip.gain * 100)}% 增益` : '素材文件缺失'}</span></button><div className="tile-meta"><span>{(clip.durationMs / 1000).toFixed(1)}s</span><button type="button" className="shortcut-chip" aria-label={`设置${clip.displayName}播放热键`} title="快速添加快捷键" onClick={() => { desktop.selectClip(clip.clipId); hotkeys(clip); }}>{desktop.state?.settings.clipHotkeys[clip.clipId] ? <kbd>{desktop.state.settings.clipHotkeys[clip.clipId]}</kbd> : <><Icon name="keyboard" size={12} /><span>快捷</span></>}</button></div><div className="tile-actions"><button type="button" disabled={!clip.available || engine?.status.emergencyLatched} onClick={() => { void desktop.perform('play', { clipId: clip.clipId, mode: 'preview' }).catch(() => undefined); }}><Icon name="play" size={13} />试听</button><button type="button" disabled={!clip.available || !engine?.status.switches.extrasSendEnabled || engine?.status.emergencyLatched} onClick={() => { void desktop.perform('play', { clipId: clip.clipId, mode: 'send' }).catch(() => undefined); }}><Icon name="send" size={13} />发送</button></div></article>;
+  })}
     {desktop.filteredClips.length === 0 && <div className="empty-state"><Icon name={engine?.libraryError ? 'info' : 'music'} size={30} /><strong>{engine?.libraryError ? '音效库不可用' : desktop.query || desktop.favoritesOnly || desktop.groupId ? '没有匹配的音效' : '导入你的第一条音效'}</strong><span>{engine?.libraryError ?? '支持 WAV / MP3，原文件不会被修改。'}</span><ImportButton /></div>}
   </div>;
 }
 
 export function ImportButton() {
   const desktop = useDesktop();
-  const disabled = !nativeRuntime || !desktop.state?.engine || Boolean(desktop.state.engine.libraryError) || desktop.importing || Boolean(desktop.duplicatePath) || Boolean(desktop.pendingAudioImport);
+  const disabled = !nativeRuntime || !desktop.state?.engine || Boolean(desktop.state.engine.libraryError) || desktop.importing || Boolean(desktop.pendingImportBatch) || Boolean(desktop.duplicatePath) || Boolean(desktop.pendingAudioImport);
   function pick(directory: boolean) {
     void open({ multiple: true, directory, ...(!directory ? { filters: [{ name: '音频（长文件可裁剪）', extensions: ['wav', 'mp3'] }] } : {}) }).then(paths => { if (paths) return desktop.importPaths(Array.isArray(paths) ? paths : [paths]); }).catch(failure => desktop.notify(errorMessage(failure)));
   }
   return <div className="import-actions"><Button disabled={disabled} onClick={() => pick(false)}><Icon name="plus" size={15} />{desktop.importing ? '正在导入…' : '导入音效'}</Button><Button disabled={disabled} onClick={() => pick(true)}><Icon name="folder" size={15} />导入文件夹</Button></div>;
 }
 
-export function GroupNavigation() {
+export function GroupNavigation({ edit }: { edit(clip: ClipItem): void }) {
   const desktop = useDesktop();
-  const groups = desktop.state?.engine?.groups ?? [];
-  const clips = desktop.state?.engine?.clips ?? [];
-  function branch(nodes: GroupNode[], depth: number): ReactNode {
-    return nodes.map(node => {
-      const ids = descendantGroupIds(groups, node.group.groupId);
-      const path = groupPath(groups, node.group.groupId).map(group => group.name).join(' / ');
-      return <li key={node.group.groupId}><button type="button" title={path} aria-label={path} aria-current={desktop.groupId === node.group.groupId ? 'page' : undefined} style={{ '--group-depth': depth } as CSSProperties} className={desktop.groupId === node.group.groupId ? 'selected' : ''} onClick={() => { desktop.setFavoritesOnly(false); desktop.setGroupId(node.group.groupId); }}><Icon name="folder" size={17} /><span>{node.group.name}</span><small>{clips.filter(clip => clip.groupId && ids.has(clip.groupId)).length}</small></button>{node.children.length > 0 && <ul>{branch(node.children, depth + 1)}</ul>}</li>;
+  const engine = desktop.state?.engine;
+  const groups = engine?.groups ?? [];
+  const clips = engine?.clips ?? [];
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set<string>());
+  const playingId = engine?.status.clip?.mode === 'Preview' && engine.status.clip.clipId.startsWith('editor-preview:') ? null : engine?.status.clip?.clipId ?? null;
+  const direct = new Map<string | null, ClipItem[]>();
+  for (const clip of clips) {
+    const bucket = direct.get(clip.groupId);
+    if (bucket) bucket.push(clip);
+    else direct.set(clip.groupId, [clip]);
+  }
+  function toggle(groupId: string) {
+    setCollapsed(current => {
+      const next = new Set(current);
+      if (next.has(groupId)) next.delete(groupId);
+      else next.add(groupId);
+      return next;
     });
   }
-  return <ul className="group-tree">{branch(groupTree(groups), 0)}</ul>;
+  function selectGroup(groupId: string) {
+    desktop.setFavoritesOnly(false);
+    desktop.setGroupId(groupId);
+    setCollapsed(current => {
+      if (!current.has(groupId)) return current;
+      const next = new Set(current);
+      next.delete(groupId);
+      return next;
+    });
+  }
+  function clipRow(clip: ClipItem, depth: number): ReactNode {
+    const path = `${groupPath(groups, clip.groupId).map(group => group.name).join(' / ') || '未分组'} / ${clip.displayName}`;
+    const picked = desktop.selectionMode && desktop.selectedClipIds.includes(clip.clipId);
+    return <li key={clip.clipId}><button type="button" style={{ '--tree-depth': depth } as CSSProperties} title={path} aria-label={path} className={`tree-clip ${clip.clipId === playingId ? 'playing' : ''} ${desktop.selectedClip?.clipId === clip.clipId ? 'selected' : ''} ${picked ? 'picked' : ''} ${clip.available ? '' : 'missing'}`} onClick={event => { if (desktop.selectionMode) { desktop.toggleClipSelection(clip.clipId, event.shiftKey); return; } desktop.selectClip(clip.clipId); edit(clip); }} onDoubleClick={() => { if (!desktop.selectionMode && clip.available) void desktop.perform('play', { clipId: clip.clipId, mode: 'send' }).catch(() => undefined); }}>{picked && <Icon name="check" size={11} />}<Icon name="audio" size={14} /><span>{clip.displayName}</span>{clip.favorite && <Icon name="star" size={11} className="tree-clip-favorite" />}</button></li>;
+  }
+  function branch(nodes: GroupNode[], depth: number): ReactNode {
+    return nodes.map(node => {
+      const groupId = node.group.groupId;
+      const ids = descendantGroupIds(groups, groupId);
+      const path = groupPath(groups, groupId).map(group => group.name).join(' / ');
+      const expanded = !collapsed.has(groupId);
+      const children = direct.get(groupId) ?? [];
+      const expandable = node.children.length > 0 || children.length > 0;
+      return <li key={groupId}><div className="tree-group-row" style={{ '--tree-depth': depth } as CSSProperties}>{expandable ? <button type="button" className="tree-toggle" aria-label={`${expanded ? '收起' : '展开'}${path}`} aria-expanded={expanded} onClick={() => toggle(groupId)}><Icon name="chevron" size={13} className="tree-caret" /></button> : <span className="tree-toggle" aria-hidden="true" />}<button type="button" className={`tree-label ${desktop.groupId === groupId ? 'selected' : ''}`} title={path} aria-label={path} aria-current={desktop.groupId === groupId ? 'page' : undefined} onClick={() => selectGroup(groupId)}><Icon name="folder" size={16} /><span>{node.group.name}</span><small>{clips.filter(clip => clip.groupId && ids.has(clip.groupId)).length}</small></button></div>{expanded && <ul>{branch(node.children, depth + 1)}{children.map(clip => clipRow(clip, depth + 1))}</ul>}</li>;
+    });
+  }
+  const ungrouped = direct.get(null) ?? [];
+  return <ul className="group-tree">{branch(groupTree(groups), 0)}{ungrouped.length > 0 && <li className="tree-section-label">未分组</li>}{ungrouped.map(clip => clipRow(clip, 0))}</ul>;
 }
 
 export function PlaybackStrip() {

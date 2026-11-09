@@ -120,5 +120,13 @@ export type AudioSource = { path: string; clipId?: never } | { clipId: string; p
 export interface AudioInspection { durationMs: number; sampleRate: number; channels: number; peaks: number[]; sourceVersion: string }
 export interface AudioSelection { sourceVersion: string; startMs: number; endMs: number; displayName: string; groupId: string | null }
 export interface PendingAudioImport { file: ImportFile; inspection: AudioInspection | null; reason: string; remaining: number }
-export interface ImportFile { path: string; groupId: string | null }
+export interface ImportFile { path: string; groupId: string | null; displayName?: string; gain?: number; favorite?: boolean }
+export interface RenameRule { mode: 'prefix' | 'suffix' | 'replace'; value: string; replacement: string }
+export interface BatchImportOptions {
+  groupMode: 'keep' | 'none' | 'group';
+  groupId: string | null;
+  gain: number;
+  favorite: boolean;
+  rename: RenameRule | null;
+}
 export interface FolderImportResult { files: ImportFile[]; rootGroupIds: string[] }

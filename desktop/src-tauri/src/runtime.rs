@@ -354,7 +354,7 @@ impl DesktopRuntime {
                 }
                 self.app.exit(0); Ok(Value::Bool(true))
             }
-            "snapshot" | "devices" | "device_enable" | "apps" | "bind_app" | "route" | "gains" | "play" | "stop" | "mute" | "unlock" | "attach_output" | "prepare_folder_import" | "import_clip" | "inspect_audio" | "preview_audio" | "import_trimmed_audio" | "release_audio_preview" | "clip_rename" | "clip_favorite" | "clip_gain" | "clip_group" | "group_create" | "group_rename" | "group_delete" | "clip_path" | "hotkeys_suspend" => self.backend()?.request(op, args).await,
+            "snapshot" | "devices" | "device_enable" | "apps" | "bind_app" | "route" | "gains" | "play" | "stop" | "mute" | "unlock" | "attach_output" | "prepare_folder_import" | "import_clip" | "inspect_audio" | "preview_audio" | "import_trimmed_audio" | "release_audio_preview" | "clip_rename" | "clip_favorite" | "clip_gain" | "clip_group" | "clip_batch_update" | "group_create" | "group_rename" | "group_delete" | "clip_path" | "hotkeys_suspend" => self.backend()?.request(op, args).await,
             _ => Err(CommandError::new("invalid-argument", format!("不支持的桌面操作: {op}"))),
         }
     }

@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import type { AudioInspection, AudioSelection, ClipItem, DesktopState, FolderImportResult, ImportFile, ImportResult, PendingAudioImport, PresetApplyResult, PresetConfig, RuntimeState } from './types';
+import type { AudioDevice, AudioInspection, AudioSelection, BatchImportOptions, ClipItem, DesktopState, FolderImportResult, ImportFile, ImportResult, PendingAudioImport, PresetApplyResult, PresetConfig, RenameRule, RuntimeState } from './types';
 import { desktopCommand, desktopState, errorMessage, nativeRuntime } from './bridge';
 import { descendantGroupIds } from './library';
 
@@ -19,8 +19,18 @@ export interface DesktopContextValue {
   groupId: string | null;
   setGroupId(value: string | null): void;
   filteredClips: ClipItem[];
+  devices: AudioDevice[];
+  selectionMode: boolean;
+  setSelectionMode(value: boolean): void;
+  selectedClipIds: string[];
+  toggleClipSelection(clipId: string, range: boolean): void;
+  selectAllClips(): void;
+  clearClipSelection(): void;
   importing: boolean;
   importPaths(paths: string[]): Promise<void>;
+  pendingImportBatch: ImportFile[] | null;
+  confirmImportBatch(options: BatchImportOptions): Promise<void>;
+  cancelImportBatch(): void;
   duplicatePath: string | null;
   resolveDuplicate(allow: boolean): Promise<void>;
   pendingAudioImport: PendingAudioImport | null;
@@ -40,6 +50,17 @@ export interface DesktopContextValue {
 }
 
 const DesktopContext = createContext<DesktopContextValue | null>(null);
+
+export function fileBaseName(path: string) {
+  return path.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') ?? '';
+}
+
+export function applyRenameRule(name: string, rule: RenameRule | null): string | undefined {
+  if (!rule || !rule.value.trim()) return undefined;
+  if (rule.mode === 'prefix') return rule.value + name;
+  if (rule.mode === 'suffix') return name + rule.value;
+  return name.split(rule.value).join(rule.replacement);
+}
 
 export function configMatches(left: PresetConfig, right: PresetConfig) {
   return left.presetId === right.presetId && left.name === right.name &&
@@ -63,6 +84,10 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
   const [importing, setImporting] = useState(false);
   const [duplicate, setDuplicate] = useState<ImportFile | null>(null);
   const [pendingAudioImport, setPendingAudioImport] = useState<PendingAudioImport | null>(null);
+  const [pendingImportBatch, setPendingImportBatch] = useState<ImportFile[] | null>(null);
+  const [selectionMode, setSelectionModeState] = useState(false);
+  const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
+  const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [leaveRequest, setLeaveRequest] = useState<LeaveRequest | null>(null);
   const [closeConfirmation, setCloseConfirmation] = useState(false);
   const mounted = useRef(true);
@@ -70,6 +95,8 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
   const refreshSerial = useRef(0);
   const presetView = useRef<string | null>(null);
   const importQueue = useRef<ImportFile[]>([]);
+  const batchRef = useRef<ImportFile[] | null>(null);
+  const selectionAnchor = useRef<string | null>(null);
   const duplicateRef = useRef<ImportFile | null>(null);
   const pendingAudioRef = useRef<PendingAudioImport | null>(null);
   const dirtyRef = useRef(false);
@@ -98,7 +125,7 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
   async function perform<T>(op: string, args: object = {}): Promise<T> {
     try {
       const result = await desktopCommand<T>(op, args);
-      if (['preset_apply', 'preset_create', 'preset_save', 'preset_rename', 'preset_duplicate', 'preset_delete', 'preset_restore', 'settings_save', 'set_transparency', 'restart_engine', 'prepare_folder_import', 'import_clip', 'import_trimmed_audio', 'clip_delete', 'clip_rename', 'clip_group', 'group_create', 'group_rename', 'group_delete', 'group_delete_contents', 'clip_favorite', 'clip_gain'].includes(op)) await refresh();
+      if (['preset_apply', 'preset_create', 'preset_save', 'preset_rename', 'preset_duplicate', 'preset_delete', 'preset_restore', 'settings_save', 'set_transparency', 'restart_engine', 'prepare_folder_import', 'import_clip', 'import_trimmed_audio', 'clip_delete', 'clip_rename', 'clip_group', 'group_create', 'group_rename', 'group_delete', 'group_delete_contents', 'clip_favorite', 'clip_gain', 'clip_batch_update'].includes(op)) await refresh();
       return result;
     } catch (failure) {
       if (op === 'group_delete_contents') await refresh();
@@ -151,6 +178,20 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
   }, [state?.engine?.groups, state?.engine?.clips, groupId, selectedId]);
 
   const clips = state?.engine?.clips ?? [];
+  useEffect(() => {
+    if (!selectedClipIds.length) return;
+    const known = new Set(clips.map(clip => clip.clipId));
+    const next = selectedClipIds.filter(id => known.has(id));
+    if (next.length !== selectedClipIds.length) setSelectedClipIds(next);
+  }, [clips, selectedClipIds]);
+  const engineReady = Boolean(state?.engine);
+  const monitorDeviceId = state?.engine?.status.devices?.monitorDeviceId ?? '';
+  useEffect(() => {
+    if (!nativeRuntime || !engineReady) return;
+    let cancelled = false;
+    void desktopCommand<AudioDevice[]>('devices').then(items => { if (!cancelled) setDevices(items); }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [engineReady, monitorDeviceId]);
   const normalized = query.trim().toLocaleLowerCase();
   const groupIds = groupId ? descendantGroupIds(state?.engine?.groups ?? [], groupId) : null;
   const filteredClips = clips.filter(clip => (!normalized || clip.displayName.toLocaleLowerCase().includes(normalized)) && (!favoritesOnly || clip.favorite) && (!groupIds || Boolean(clip.groupId && groupIds.has(clip.groupId))));
@@ -230,19 +271,48 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
     } finally { importingRef.current = false; if (mounted.current) setImporting(false); }
   }
   async function importPaths(paths: string[]) {
-    if (importingRef.current || pendingAudioRef.current || duplicateRef.current || importQueue.current.length) throw new Error('请先处理当前导入请求');
+    if (importingRef.current || pendingAudioRef.current || duplicateRef.current || importQueue.current.length || batchRef.current) throw new Error('请先处理当前导入请求');
     importingRef.current = true;
     setImporting(true);
+    let prepared: FolderImportResult;
     try {
-      const prepared = await perform<FolderImportResult>('prepare_folder_import', { paths });
+      prepared = await perform<FolderImportResult>('prepare_folder_import', { paths });
       if (state && prepared.rootGroupIds.length) {
         await perform('settings_save', { settings: { ...state.settings, ui: { ...state.settings.ui, clipSort: 'libraryOrder' } } });
         setFavoritesOnly(false);
         setGroupId(null);
       }
-      importQueue.current.push(...prepared.files);
     } finally { importingRef.current = false; if (mounted.current) setImporting(false); }
+    if (prepared.files.length === 0) return;
+    if (prepared.files.length === 1) {
+      importQueue.current.push(...prepared.files);
+      await drainImports();
+      return;
+    }
+    batchRef.current = prepared.files;
+    setPendingImportBatch(prepared.files);
+  }
+  async function confirmImportBatch(options: BatchImportOptions) {
+    const files = batchRef.current;
+    if (!files) return;
+    const queued = files.map(file => ({
+      ...file,
+      groupId: options.groupMode === 'keep' ? file.groupId : options.groupMode === 'group' ? options.groupId : null,
+      displayName: applyRenameRule(fileBaseName(file.path), options.rename),
+      gain: options.gain,
+      favorite: options.favorite,
+    }));
+    batchRef.current = null;
+    setPendingImportBatch(null);
+    importQueue.current.push(...queued);
     await drainImports();
+  }
+  function cancelImportBatch() {
+    const files = batchRef.current;
+    if (!files) return;
+    batchRef.current = null;
+    setPendingImportBatch(null);
+    setToast(`已取消导入 ${files.length} 个文件；准备阶段创建的分组保留，原文件未修改。`);
   }
   async function resolveDuplicate(allow: boolean) {
     const file = duplicateRef.current;
@@ -267,7 +337,7 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
     setImporting(true);
     let result: ImportResult;
     try {
-      result = await perform<ImportResult>('import_trimmed_audio', { path: pending.file.path, ...selection, groupId: pending.file.groupId, allowDuplicate });
+      result = await perform<ImportResult>('import_trimmed_audio', { path: pending.file.path, ...selection, groupId: pending.file.groupId, gain: pending.file.gain, favorite: pending.file.favorite, allowDuplicate });
       if (result.outcome === 'Imported') {
         importQueue.current.shift();
         pendingAudioRef.current = null;
@@ -295,6 +365,31 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
     setDuplicate(null);
     setToast(`已取消 ${remaining} 个尚未导入的文件；已导入音效和创建的分组保留，原文件未修改。`);
   }
+  function setSelectionMode(value: boolean) {
+    setSelectionModeState(value);
+    if (!value) {
+      setSelectedClipIds([]);
+      selectionAnchor.current = null;
+    }
+  }
+  function toggleClipSelection(clipId: string, range: boolean) {
+    const order = filteredClips.map(clip => clip.clipId);
+    if (!range) selectionAnchor.current = clipId;
+    setSelectedClipIds(current => {
+      if (range && selectionAnchor.current) {
+        const from = order.indexOf(selectionAnchor.current);
+        const to = order.indexOf(clipId);
+        if (from >= 0 && to >= 0) {
+          const start = Math.min(from, to);
+          const end = Math.max(from, to);
+          return Array.from(new Set([...current, ...order.slice(start, end + 1)]));
+        }
+      }
+      return current.includes(clipId) ? current.filter(id => id !== clipId) : [...current, clipId];
+    });
+  }
+  function selectAllClips() { setSelectedClipIds(filteredClips.map(clip => clip.clipId)); }
+  function clearClipSelection() { setSelectedClipIds([]); selectionAnchor.current = null; }
   async function closeToTray(keep: boolean) {
     if (keep) await perform('hide_window');
     setCloseConfirmation(false);
@@ -302,8 +397,10 @@ export function DesktopProvider({ children }: { children: ReactNode }) {
 
   const value: DesktopContextValue = {
     state, error, toast, selectedClip, selectClip: setSelectedId, query, setQuery,
-    favoritesOnly, setFavoritesOnly, groupId, setGroupId, filteredClips,
-    importing, importPaths, duplicatePath: duplicate?.path ?? null, resolveDuplicate,
+    favoritesOnly, setFavoritesOnly, groupId, setGroupId, filteredClips, devices,
+    selectionMode, setSelectionMode, selectedClipIds, toggleClipSelection, selectAllClips, clearClipSelection,
+    importing, importPaths, pendingImportBatch, confirmImportBatch, cancelImportBatch,
+    duplicatePath: duplicate?.path ?? null, resolveDuplicate,
     pendingAudioImport, saveAudioImport, skipAudioImport, cancelImports,
     dirty, currentConfig, leaveRequest, resolveLeave, requestPreset,
     closeConfirmation, closeToTray, perform, refresh, notify: setToast,

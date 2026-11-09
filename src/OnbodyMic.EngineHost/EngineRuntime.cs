@@ -264,9 +264,11 @@ internal sealed class EngineRuntime : IAsyncDisposable
                     throw HostCommandException.Invalid("displayName must not be empty");
                 var allowDuplicate = CommandArguments.OptionalBoolean(args, "allowDuplicate");
                 var importGroupId = CommandArguments.OptionalString(args, "groupId");
+                var importGain = args.TryGetProperty("gain", out _) ? CommandArguments.Gain(args, "gain") : 1f;
+                var importFavorite = args.TryGetProperty("favorite", out _) ? CommandArguments.Boolean(args, "favorite") : false;
                 return QueueLibraryWork(library =>
                 {
-                    var imported = library.Import(path, name, allowDuplicate, importGroupId);
+                    var imported = library.Import(path, name, allowDuplicate, importGroupId, importGain, importFavorite);
                     return new ImportResultData(imported.Outcome.ToString(), ClipItemData.FromDomain(imported.Item, library),
                         imported.ExistingDuplicate is { } duplicate ? ClipItemData.FromDomain(duplicate, library) : null);
                 });
@@ -308,6 +310,37 @@ internal sealed class EngineRuntime : IAsyncDisposable
                     if (!library.SetGroup(groupClipId, groupId)) throw HostCommandException.Rejected("clip-group-rejected");
                     return true;
                 });
+            case "clip_batch_update":
+                var batchIdsElement = CommandArguments.Required(args, "clipIds");
+                if (batchIdsElement.ValueKind != JsonValueKind.Array)
+                    throw HostCommandException.Invalid("clipIds must be an array of clip ids");
+                var batchIds = batchIdsElement.EnumerateArray()
+                    .Select(value => value.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(value.GetString())
+                        ? value.GetString()!
+                        : throw HostCommandException.Invalid("clipIds must contain non-empty strings"))
+                    .ToArray();
+                if (batchIds.Length == 0) throw HostCommandException.Invalid("clipIds must not be empty");
+                var applyGroup = args.TryGetProperty("groupId", out _);
+                var batchGroupId = applyGroup ? CommandArguments.OptionalString(args, "groupId") : null;
+                var batchGain = args.TryGetProperty("gain", out _) ? CommandArguments.Gain(args, "gain") : (float?)null;
+                var batchFavorite = args.TryGetProperty("favorite", out _) ? CommandArguments.Boolean(args, "favorite") : (bool?)null;
+                Func<ClipItem, string>? batchRename = null;
+                if (args.TryGetProperty("rename", out var renameArgs) && renameArgs.ValueKind != JsonValueKind.Null)
+                {
+                    var renameMode = CommandArguments.String(renameArgs, "mode");
+                    var renameValue = CommandArguments.OptionalString(renameArgs, "value") ?? string.Empty;
+                    var renameReplacement = CommandArguments.OptionalString(renameArgs, "replacement") ?? string.Empty;
+                    if (string.IsNullOrEmpty(renameValue) && renameMode is "prefix" or "suffix" or "replace")
+                        throw HostCommandException.Invalid("rename.value must not be empty");
+                    batchRename = renameMode switch
+                    {
+                        "prefix" => item => renameValue + item.DisplayName,
+                        "suffix" => item => item.DisplayName + renameValue,
+                        "replace" => item => item.DisplayName.Replace(renameValue, renameReplacement, StringComparison.Ordinal),
+                        _ => throw HostCommandException.Invalid("rename.mode must be prefix, suffix or replace"),
+                    };
+                }
+                return QueueLibraryWork(library => library.UpdateMany(batchIds, applyGroup, batchGroupId, batchGain, batchFavorite, batchRename));
             case "clip_delete":
                 return DeleteClipAsync(CommandArguments.String(args, "clipId"));
             case "group_create":
@@ -875,6 +908,8 @@ internal sealed class EngineRuntime : IAsyncDisposable
         var displayName = CommandArguments.String(args, "displayName");
         var allowDuplicate = CommandArguments.OptionalBoolean(args, "allowDuplicate");
         var groupId = CommandArguments.OptionalString(args, "groupId");
+        var gain = args.TryGetProperty("gain", out _) ? CommandArguments.Gain(args, "gain") : 1f;
+        var favorite = args.TryGetProperty("favorite", out _) ? CommandArguments.Boolean(args, "favorite") : false;
         if (endMs > int.MaxValue) throw HostCommandException.Invalid("selection times exceed the provenance millisecond range");
         var originStart = checked((int)Math.Round(startMs, MidpointRounding.AwayFromZero));
         var originEnd = checked((int)Math.Round(endMs, MidpointRounding.AwayFromZero));
@@ -899,7 +934,7 @@ internal sealed class EngineRuntime : IAsyncDisposable
                     request.Cancellation.Token.ThrowIfCancellationRequested();
                     if (source.ClipId is { } parentId) RequireClip(library, parentId);
                     if (groupId is not null) RequireGroup(library, groupId);
-                    var imported = library.ImportSelection(exported, origin, displayName, allowDuplicate, groupId);
+                    var imported = library.ImportSelection(exported, origin, displayName, allowDuplicate, groupId, gain, favorite);
                     return new ImportResultData(imported.Outcome.ToString(), ClipItemData.FromDomain(imported.Item, library),
                         imported.ExistingDuplicate is { } duplicate ? ClipItemData.FromDomain(duplicate, library) : null);
                 }, slot);

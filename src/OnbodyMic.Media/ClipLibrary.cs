@@ -278,21 +278,24 @@ public sealed class ClipLibrary : IDisposable
         }
     }
 
-    public ImportResult Import(string sourcePath, string? displayName = null, bool allowDuplicate = false, string? groupId = null)
-        => ImportCore(sourcePath, displayName, allowDuplicate, groupId, origin: null);
+    public ImportResult Import(string sourcePath, string? displayName = null, bool allowDuplicate = false, string? groupId = null, float gain = 1f, bool favorite = false)
+        => ImportCore(sourcePath, displayName, allowDuplicate, groupId, origin: null, gain, favorite);
 
     /// <summary>Imports an independently owned exported WAV, retaining its source provenance rather than the temporary export path.</summary>
-    public ImportResult ImportSelection(string exportedWavPath, ClipOrigin origin, string displayName, bool allowDuplicate = false, string? groupId = null)
+    public ImportResult ImportSelection(string exportedWavPath, ClipOrigin origin, string displayName, bool allowDuplicate = false, string? groupId = null, float gain = 1f, bool favorite = false)
     {
         if (origin is null) throw new ClipImportException("selection origin is required");
         if (ValidateOrigin(origin) is { } reason) throw new ClipImportException(reason);
         if (string.IsNullOrWhiteSpace(displayName)) throw new ClipImportException("selection display name must not be empty");
         origin = origin with { OriginalPath = Path.GetFullPath(origin.OriginalPath) };
-        return ImportCore(exportedWavPath, displayName, allowDuplicate, groupId, origin);
+        return ImportCore(exportedWavPath, displayName, allowDuplicate, groupId, origin, gain, favorite);
     }
 
-    private ImportResult ImportCore(string sourcePath, string? displayName, bool allowDuplicate, string? groupId, ClipOrigin? origin)
+    private ImportResult ImportCore(string sourcePath, string? displayName, bool allowDuplicate, string? groupId, ClipOrigin? origin, float gain, bool favorite)
     {
+        if (!float.IsFinite(gain) || gain is < 0f or > 4f)
+            throw new ClipImportException("import gain must be a finite number in 0..4");
+
         var fullPath = Path.GetFullPath(sourcePath);
         if (!File.Exists(fullPath))
             throw new ClipImportException($"file not found: {sourcePath}");
@@ -354,9 +357,9 @@ public sealed class ClipLibrary : IDisposable
                     origin?.OriginalPath ?? fullPath,
                     (int)duration.TotalMilliseconds,
                     extension.TrimStart('.'),
-                    Favorite: false,
+                    Favorite: favorite,
                     GroupId: groupId,
-                    Gain: 1f,
+                    Gain: gain,
                     DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     origin,
                     WaveformPeaks.Compute(decoded.Samples));
@@ -426,6 +429,81 @@ public sealed class ClipLibrary : IDisposable
             }
 
             return MutateItem(clipId, item => item with { GroupId = groupId });
+        }
+    }
+
+    /// <summary>
+    /// Applies one metadata change set to several clips with a single index write.
+    /// Missing clips, unknown groups, invalid gains or empty renamed names reject the whole
+    /// batch before anything is persisted; a failed write restores every touched entry.
+    /// </summary>
+    public int UpdateMany(
+        IReadOnlyList<string> clipIds,
+        bool applyGroup,
+        string? groupId,
+        float? gain,
+        bool? favorite,
+        Func<ClipItem, string>? rename)
+    {
+        ArgumentNullException.ThrowIfNull(clipIds);
+        if (clipIds.Count == 0)
+        {
+            return 0;
+        }
+
+        lock (_gate)
+        {
+            if (applyGroup && groupId is not null && _groups.All(g => g.GroupId != groupId))
+                throw new ClipImportException($"group not found: {groupId}");
+            if (gain is { } requested && (!float.IsFinite(requested) || requested is < 0f or > 4f))
+                throw new ClipImportException("gain must be a finite number in 0..4");
+
+            var updates = new (int Index, ClipItem Original, ClipItem Updated)[clipIds.Count];
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var cursor = 0;
+            foreach (var clipId in clipIds)
+            {
+                if (string.IsNullOrWhiteSpace(clipId) || !seen.Add(clipId))
+                    throw new ClipImportException($"invalid clip id: {clipId}");
+
+                var index = _items.FindIndex(i => i.ClipId == clipId);
+                if (index < 0)
+                    throw new ClipImportException($"clip not found: {clipId}");
+
+                var original = _items[index];
+                var updated = original;
+                if (applyGroup) updated = updated with { GroupId = groupId };
+                if (gain is { } gainValue) updated = updated with { Gain = gainValue };
+                if (favorite is { } favoriteValue) updated = updated with { Favorite = favoriteValue };
+                if (rename is not null)
+                {
+                    var name = rename(updated)?.Trim();
+                    if (string.IsNullOrEmpty(name))
+                        throw new ClipImportException($"clip name must not be empty: {clipId}");
+                    updated = updated with { DisplayName = name };
+                }
+
+                updates[cursor++] = (index, original, updated);
+            }
+
+            if (updates.All(update => update.Updated == update.Original))
+            {
+                return updates.Length;
+            }
+
+            foreach (var update in updates) _items[update.Index] = update.Updated;
+            try
+            {
+                SaveIndex();
+            }
+            catch
+            {
+                foreach (var update in updates) _items[update.Index] = update.Original;
+                throw;
+            }
+
+            Changed?.Invoke();
+            return updates.Length;
         }
     }
 
