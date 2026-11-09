@@ -2480,7 +2480,7 @@ dependencies = [
 
 [[package]]
 name = "onbodymic-desktop"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "indexmap 2.14.2",
  "reqwest",
